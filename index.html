@@ -128,6 +128,59 @@
     flex: 1;
   }
 
+  /* --- 本体電池(第3版) --- */
+  .bat-banner {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    margin: -16px -16px 12px;
+    padding: 10px 16px;
+    font-size: 14px;
+    font-weight: 600;
+    display: none;
+  }
+  .bat-banner.warn { display: block; background: #4a3b0b; color: #facc15; }
+  .bat-banner.low  { display: block; background: #4a1212; color: #f87171; }
+  .bat-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 12px;
+    font-size: 13px;
+    color: #aaa;
+  }
+  .bat-bar {
+    position: relative;
+    flex: 1;
+    height: 12px;
+    border: 1px solid #555;
+    border-radius: 3px;
+    overflow: hidden;
+    /* 区間ごとの色(本体と同じ): 0-10% 赤 / 10-20% 黄 / 20-100% 緑 */
+    background: linear-gradient(to right, #ef4444 0 10%, #eab308 10% 20%, #22c55e 20% 100%);
+  }
+  .bat-bar.unknown { background: #2a2d38; }
+  .bat-empty {           /* 残量の無い部分を右から覆う */
+    position: absolute;
+    top: 0; right: 0; bottom: 0;
+    width: 100%;
+    background: #1a1c22;
+  }
+  .bat-pct {
+    min-width: 40px;
+    text-align: right;
+    color: #eee;
+    font-variant-numeric: tabular-nums;
+  }
+  .bat-chg {
+    font-size: 12px;
+    padding: 1px 8px;
+    border-radius: 999px;
+    background: #0e3a44;
+    color: #22d3ee;
+    display: none;
+  }
+
   pre#payloadPreview {
     background: #1a1c22;
     border-radius: 10px;
@@ -143,12 +196,21 @@
 </head>
 <body>
 
+<div class="bat-banner" id="batBanner"></div>
+
 <h1>TPU-MINI</h1>
 <div class="sub">送信機とBluetoothで接続し、確定値を4輪分まとめてGASへ送る想定のスマホアプリ(骨組み・初版)</div>
 
 <div class="row">
   <button id="connectBtn" class="primary">接続する</button>
   <span id="connStatus" class="status disconnected">未接続</span>
+</div>
+
+<div class="bat-row">
+  <span>本体電池</span>
+  <div class="bat-bar unknown" id="batBar"><div class="bat-empty" id="batEmpty"></div></div>
+  <span class="bat-pct" id="batPct">--%</span>
+  <span class="bat-chg" id="batChg">充電中</span>
 </div>
 
 <div class="live-card">
@@ -181,7 +243,11 @@
 
 <script>
 // =================================================================
-// TPU-MINI スマホ側Webアプリ(骨組み・第2版: GAS送信を旧TPU互換の形式で実装)
+// TPU-MINI スマホ側Webアプリ(第3版: 第2版 + 本体の電池残量表示と充電の催促)
+// ・第3版: 送信機の電池特性(BAT_CHAR、"<残量%>;<充電台0/1>")を受け取り、
+//   本体と同じ色分けのバー+数字を表示。20%未満で黄、10%未満で赤の帯を画面上部に出す
+//   (ずれ幅あり: 黄は25%以上、赤は15%以上に戻るまで消さない)。充電台に置いている間は帯を出さない。
+//   電池特性の無い古い送信機(第5.4版以前)につないだ場合は電池欄が「--」のまま、他は従来どおり動く。
 // ・送信機(M5StickC PLUS2)とWeb Bluetoothで接続し、live/confirmed/modeの3
 //   characteristicをsubscribeするだけの最小構成。
 // ・4輪分の確定値を集めて car番号 と一緒にJSONへまとめ、GASへPOSTするところまで実装。
@@ -210,6 +276,10 @@ const SERVICE_UUID        = "12345678-1234-5678-1234-56789abcdef0";
 const LIVE_CHAR_UUID      = "12345678-1234-5678-1234-56789abcdef1";
 const CONFIRMED_CHAR_UUID = "12345678-1234-5678-1234-56789abcdef2";
 const MODE_CHAR_UUID      = "12345678-1234-5678-1234-56789abcdef3";
+const BAT_CHAR_UUID       = "12345678-1234-5678-1234-56789abcdef6";
+
+const BAT_WARN_PCT = 20, BAT_WARN_CLEAR_PCT = 25;  // 黄色の帯
+const BAT_LOW_PCT  = 10, BAT_LOW_CLEAR_PCT  = 15;  // 赤い帯
 
 // ★旧TPU(Core2版)と同じGAS Web App/スプレッドシートをそのまま使う方針のため、URLもそのまま流用。
 const GAS_URL = "https://script.google.com/macros/s/AKfycbzVkPtrjLQHoI61LLRGcJu7mJ58D-VdpwrOCB4kXyT_W8gUPw28EHwf2Yksgl8IIH33/exec";
@@ -336,6 +406,59 @@ async function sendToGas() {
   }
 }
 
+// ---- 本体電池 ----------------------------------------------------
+let batBannerLevel = 0;  // 0=なし / 1=黄 / 2=赤(ずれ幅付きで切り替える)
+
+function renderBattery(pct, onCharger) {
+  const bar = el("batBar");
+  if (pct == null || pct < 0) {
+    bar.classList.add("unknown");
+    el("batEmpty").style.width = "100%";
+    el("batPct").textContent = "--%";
+    el("batChg").style.display = "none";
+    batBannerLevel = 0;
+  } else {
+    const p = Math.max(0, Math.min(100, pct));
+    bar.classList.remove("unknown");
+    el("batEmpty").style.width = (100 - p) + "%";
+    el("batPct").textContent = p + "%";
+    el("batChg").style.display = onCharger ? "inline-block" : "none";
+
+    if (onCharger) {
+      batBannerLevel = 0;                       // 充電台に置いたら催促しない
+    } else if (p < BAT_LOW_PCT) {
+      batBannerLevel = 2;
+    } else if (batBannerLevel === 2 && p < BAT_LOW_CLEAR_PCT) {
+      // 赤のまま
+    } else if (p < BAT_WARN_PCT) {
+      batBannerLevel = 1;
+    } else if (batBannerLevel >= 1 && p < BAT_WARN_CLEAR_PCT) {
+      batBannerLevel = 1;                       // 黄のまま
+    } else {
+      batBannerLevel = 0;
+    }
+  }
+
+  const banner = el("batBanner");
+  if (batBannerLevel === 2) {
+    banner.className = "bat-banner low";
+    banner.textContent = "本体を充電してください";
+  } else if (batBannerLevel === 1) {
+    banner.className = "bat-banner warn";
+    banner.textContent = "本体の残量が少なくなっています";
+  } else {
+    banner.className = "bat-banner";
+    banner.textContent = "";
+  }
+}
+
+// "42;0" → {pct:42, onCharger:false}
+function parseBattery(text) {
+  const [a, b] = text.split(";");
+  const pct = parseInt(a, 10);
+  return { pct: Number.isNaN(pct) ? null : pct, onCharger: b === "1" };
+}
+
 function setConnected(connected) {
   const statusEl = el("connStatus");
   if (connected) {
@@ -348,6 +471,7 @@ function setConnected(connected) {
     el("connectBtn").textContent = "接続する";
     el("liveValue").textContent = "--.-";
     el("modeBadge").textContent = "MODE: -";
+    renderBattery(null, false);   // 未接続の間は分からないので「--」に戻し、帯も消す
   }
 }
 
@@ -394,6 +518,21 @@ async function connect() {
       lastKnownModeChar = text;
       el("modeBadge").textContent = "MODE: " + (text === "A" ? "AUTO" : "MANUAL");
     } catch (_) { /* Readできなくても致命的ではないので無視 */ }
+
+    // ★本体電池(第5.5版以降の送信機のみ)。無ければ電池欄は「--」のまま、他は従来どおり
+    try {
+      const batChar = await service.getCharacteristic(BAT_CHAR_UUID);
+      await batChar.startNotifications();
+      batChar.addEventListener("characteristicvaluechanged", (e) => {
+        const b = parseBattery(textDecoder.decode(e.target.value));
+        renderBattery(b.pct, b.onCharger);
+      });
+      const initialBat = await batChar.readValue();
+      const b = parseBattery(textDecoder.decode(initialBat));
+      renderBattery(b.pct, b.onCharger);
+    } catch (err) {
+      console.log("[TPU-MINI] battery characteristic not available:", err.message);
+    }
 
     setConnected(true);
   } catch (err) {
