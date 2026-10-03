@@ -1,0 +1,426 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>TPU-MINI</title>
+<style>
+  :root {
+    color-scheme: dark;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", Arial, sans-serif;
+    background: #111318;
+    color: #eee;
+    padding: 16px;
+    padding-bottom: 48px;
+  }
+  h1 {
+    font-size: 20px;
+    margin: 0 0 4px;
+  }
+  .sub {
+    font-size: 12px;
+    color: #888;
+    margin-bottom: 16px;
+  }
+  .row {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    margin-bottom: 12px;
+    flex-wrap: wrap;
+  }
+  button {
+    font-size: 15px;
+    padding: 10px 16px;
+    border-radius: 8px;
+    border: 1px solid #444;
+    background: #23262f;
+    color: #eee;
+  }
+  button.primary {
+    background: #2f6fed;
+    border-color: #2f6fed;
+  }
+  button:disabled {
+    opacity: 0.4;
+  }
+  select, input[type="number"] {
+    font-size: 15px;
+    padding: 8px 10px;
+    border-radius: 8px;
+    border: 1px solid #444;
+    background: #1a1c22;
+    color: #eee;
+  }
+  .status {
+    font-size: 13px;
+    padding: 3px 10px;
+    border-radius: 999px;
+    display: inline-block;
+  }
+  .status.connected { background: #163d24; color: #4ade80; }
+  .status.disconnected { background: #3d1a1a; color: #f87171; }
+
+  .live-card {
+    background: #1a1c22;
+    border-radius: 14px;
+    padding: 20px;
+    text-align: center;
+    margin-bottom: 16px;
+  }
+  .live-value {
+    font-size: 56px;
+    font-weight: 600;
+    line-height: 1;
+  }
+  .live-unit {
+    font-size: 14px;
+    color: #888;
+    margin-top: 4px;
+  }
+  .mode-badge {
+    display: inline-block;
+    margin-top: 8px;
+    font-size: 12px;
+    padding: 2px 10px;
+    border-radius: 999px;
+    background: #2a2d38;
+    color: #aaa;
+  }
+
+  .wheels {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+    margin-bottom: 16px;
+  }
+  .wheel-box {
+    background: #1a1c22;
+    border-radius: 12px;
+    padding: 14px;
+    text-align: center;
+    border: 2px solid transparent;
+  }
+  .wheel-box.active {
+    border-color: #2f6fed;
+  }
+  .wheel-name {
+    font-size: 13px;
+    color: #888;
+  }
+  .wheel-value {
+    font-size: 28px;
+    margin-top: 4px;
+  }
+  .wheel-value.empty {
+    color: #444;
+  }
+
+  .footer-actions {
+    display: flex;
+    gap: 10px;
+  }
+  .footer-actions button {
+    flex: 1;
+  }
+
+  pre#payloadPreview {
+    background: #1a1c22;
+    border-radius: 10px;
+    padding: 10px;
+    font-size: 11px;
+    color: #9ca3af;
+    white-space: pre-wrap;
+    word-break: break-all;
+    margin-top: 12px;
+    display: none;
+  }
+</style>
+</head>
+<body>
+
+<h1>TPU-MINI</h1>
+<div class="sub">送信機とBluetoothで接続し、確定値を4輪分まとめてGASへ送る想定のスマホアプリ(骨組み・初版)</div>
+
+<div class="row">
+  <button id="connectBtn" class="primary">接続する</button>
+  <span id="connStatus" class="status disconnected">未接続</span>
+</div>
+
+<div class="live-card">
+  <div class="live-value" id="liveValue">--.-</div>
+  <div class="live-unit">kPa (ライブ値)</div>
+  <div class="mode-badge" id="modeBadge">MODE: -</div>
+</div>
+
+<div class="row">
+  <label style="font-size:13px;color:#aaa;">車番</label>
+  <input type="number" id="carNo" value="1" min="1" max="999" style="width:80px;">
+  <label style="font-size:13px;color:#aaa;">測定順</label>
+  <select id="wheelOrder">
+    <option value="0">FL始点 (FL-RL-RR-FR)</option>
+    <option value="1">FR始点 (FR-RR-RL-FL)</option>
+    <option value="2">RL始点 (RL-FL-FR-RR)</option>
+    <option value="3">RL始点・逆回り (RL-RR-FR-FL)</option>
+    <option value="4">RR始点 (RR-RL-FL-FR)</option>
+  </select>
+</div>
+
+<div class="wheels" id="wheelGrid"></div>
+
+<div class="footer-actions">
+  <button id="resetBtn">リセット</button>
+  <button id="sendBtn" class="primary" disabled>GASへ送信</button>
+</div>
+
+<pre id="payloadPreview"></pre>
+
+<script>
+// =================================================================
+// TPU-MINI スマホ側Webアプリ(骨組み・第2版: GAS送信を旧TPU互換の形式で実装)
+// ・送信機(M5StickC PLUS2)とWeb Bluetoothで接続し、live/confirmed/modeの3
+//   characteristicをsubscribeするだけの最小構成。
+// ・4輪分の確定値を集めて car番号 と一緒にJSONへまとめ、GASへPOSTするところまで実装。
+// ・「既存のGAS Web App/スプレッドシートをそのまま使い続けたい」との方針のため、
+//   旧TPU(Core2版)のsendDirectToGas()と同じJSON形式(tireIndex/tire/pressure/mode/
+//   carNo/sessionId/elapsedSec)に合わせている。GAS_URLも旧スケッチのものをそのまま流用。
+//     - tireIndexは旧enum WheelIndex{FL=0,RL=1,RR=2,FR=3}と同じ固定インデックス
+//     - sessionIdは旧機と同じ"#"+車番3桁ゼロ埋め
+//     - elapsedSecは「1輪目確定〜4輪目確定」の経過秒数をスマホ側で計測し直したもの
+//     - modeは旧機のNORMAL/SINGLE/TESTとは概念が違うため、送信機のAUTO/MANUALを
+//       そのまま文字列で入れている(旧スプレッドシート側がこの値で条件分岐している場合は要調整)
+//   旧機にあった「0圧でもテスト送信」機能(TEST modeでのGAS疎通確認)は今のところ未実装。
+// ・GAS Web AppはブラウザのfetchだとCORSプリフライトで詰まりやすいため、
+//   Content-Type: text/plain で送るワークアラウンドを使っている(GAS側のdoPost()が
+//   e.postData.contentsを文字列としてJSON.parse()する前提。既存のdoPost()実装を要確認)。
+// ・ブラウザのlocalStorage等は意図的に使っていない(車番・測定順は毎回リセット)。
+//
+// ★重要: Web Bluetoothは「secureコンテキスト」でしか動かない(https、または
+//   localhostのみ)。このファイルをそのままfile://で開くと繋がらない場合がある。
+//   実機テストの際は、簡易httpsサーバ(例: GitHub Pages等)でホストして開くこと。
+//   fetch()自体はfile://でも動く可能性が高いが、GAS側のCORS設定次第では
+//   ブラウザのコンソールでエラーが出ないか実機テスト時に確認すること。
+// =================================================================
+
+const SERVICE_UUID        = "12345678-1234-5678-1234-56789abcdef0";
+const LIVE_CHAR_UUID      = "12345678-1234-5678-1234-56789abcdef1";
+const CONFIRMED_CHAR_UUID = "12345678-1234-5678-1234-56789abcdef2";
+const MODE_CHAR_UUID      = "12345678-1234-5678-1234-56789abcdef3";
+
+// ★旧TPU(Core2版)と同じGAS Web App/スプレッドシートをそのまま使う方針のため、URLもそのまま流用。
+const GAS_URL = "https://script.google.com/macros/s/AKfycbzVkPtrjLQHoI61LLRGcJu7mJ58D-VdpwrOCB4kXyT_W8gUPw28EHwf2Yksgl8IIH33/exec";
+
+const WHEEL_NAMES = ["FL", "RL", "RR", "FR"];
+// ★旧スケッチのenum WheelIndex{FL=0,RL=1,RR=2,FR=3}と同じ固定インデックス(測定順とは無関係)
+const WHEEL_INDEX = { FL: 0, RL: 1, RR: 2, FR: 3 };
+const WHEEL_ORDER_TABLE = [
+  ["FL", "RL", "RR", "FR"],
+  ["FR", "RR", "RL", "FL"],
+  ["RL", "FL", "FR", "RR"],
+  ["RL", "RR", "FR", "FL"],
+  ["RR", "RL", "FL", "FR"],
+];
+
+let bleDevice = null;
+let bleServer = null;
+let wheelValues = {};      // 例: {FL: 215.3, RL: null, ...}
+let wheelTimestamps = {};  // 各輪の確定値を受け取った時刻(ms、Date.now()) ※elapsedSec算出用
+let sessionStartMs = null; // このセッションで最初に確定値を受け取った時刻
+let currentOrderIdx = 0;   // 現在の測定順パターン内での「次に埋める位置」
+let lastKnownModeChar = "A"; // 送信機からのBLE mode通知の最新値("A"=AUTO/"M"=MANUAL)。GAS送信のmode欄に使う
+
+const el = (id) => document.getElementById(id);
+const textDecoder = new TextDecoder("utf-8");
+
+function currentWheelOrder() {
+  const modeIdx = parseInt(el("wheelOrder").value, 10);
+  return WHEEL_ORDER_TABLE[modeIdx];
+}
+
+function resetSession() {
+  wheelValues = {};
+  wheelTimestamps = {};
+  sessionStartMs = null;
+  currentOrderIdx = 0;
+  currentWheelOrder().forEach(w => wheelValues[w] = null);
+  renderWheels();
+  el("sendBtn").disabled = true;
+  el("payloadPreview").style.display = "none";
+}
+
+function renderWheels() {
+  const order = currentWheelOrder();
+  const nextWheel = order[currentOrderIdx] || null;
+  el("wheelGrid").innerHTML = order.map(w => {
+    const v = wheelValues[w];
+    const isActive = (w === nextWheel);
+    return `
+      <div class="wheel-box ${isActive ? "active" : ""}">
+        <div class="wheel-name">${w}</div>
+        <div class="wheel-value ${v == null ? "empty" : ""}">${v == null ? "---" : v.toFixed(1)}</div>
+      </div>`;
+  }).join("");
+}
+
+function onConfirmedValue(kpa) {
+  const order = currentWheelOrder();
+  if (currentOrderIdx >= order.length) return; // 4輪分埋まっていれば無視(手動リセット待ち)
+  const wheel = order[currentOrderIdx];
+  const now = Date.now();
+  if (sessionStartMs == null) sessionStartMs = now; // ★旧機と同じく「1輪目確定」でセッション計測開始
+  wheelValues[wheel] = kpa;
+  wheelTimestamps[wheel] = now;
+  currentOrderIdx++;
+  renderWheels();
+  if (currentOrderIdx >= order.length) {
+    el("sendBtn").disabled = false;
+  }
+}
+
+// ★旧TPU(Core2版)のsendDirectToGas()と同じJSON形式(配列、各要素にtireIndex/tire/pressure/
+//   mode/carNo/sessionId/elapsedSecを持たせる)に合わせている。既存のGAS Web App/
+//   スプレッドシートをそのまま流用する前提。
+function buildPayload() {
+  const carNo = parseInt(el("carNo").value, 10) || 0;
+  const carNoStr = String(carNo).padStart(3, "0");
+  const sessionId = "#" + carNoStr; // ★旧機のsetNumStr("#%03d")と同じ形式
+  const order = currentWheelOrder();
+
+  // ★旧機は「1輪目確定」〜「4輪目確定」までの経過秒数。4輪目のタイムスタンプ - セッション開始時刻で算出
+  const lastWheel = order[order.length - 1];
+  const elapsedMs = (sessionStartMs != null && wheelTimestamps[lastWheel] != null)
+    ? (wheelTimestamps[lastWheel] - sessionStartMs) : 0;
+  const elapsedSec = Math.round(elapsedMs / 1000);
+
+  // ★旧機のmode欄(NORMAL/SINGLE/TEST)とは概念が異なるため、送信機のAUTO/MANUALをそのまま流用する
+  const modeStr = (lastKnownModeChar === "A") ? "AUTO" : "MANUAL";
+
+  return order.map(w => ({
+    tireIndex: WHEEL_INDEX[w],
+    tire: w,
+    pressure: wheelValues[w],
+    mode: modeStr,
+    carNo: carNoStr,
+    sessionId: sessionId,
+    elapsedSec: elapsedSec,
+  }));
+}
+
+async function sendToGas() {
+  const payload = buildPayload();
+  const preview = el("payloadPreview");
+  preview.style.display = "block";
+  preview.textContent = "送信中...\n" + JSON.stringify(payload, null, 2);
+
+  try {
+    // ★GAS Web AppはブラウザからのfetchでCORSプリフライト(OPTIONS)をうまく捌けないことが多いため、
+    //   "simple request"扱いになるtext/plainで送る(GAS側のdoPost()はe.postData.contentsを
+    //   文字列として受け取りJSON.parse()する想定。既存のdoPost()がその形で書かれていることを確認)。
+    const res = await fetch(GAS_URL, {
+      method: "POST",
+      headers: { "Content-Type": "text/plain;charset=utf-8" },
+      body: JSON.stringify(payload),
+    });
+    preview.textContent = `送信完了(HTTP ${res.status})\n` + JSON.stringify(payload, null, 2);
+    console.log("[TPU-MINI] sent to GAS:", payload, "status:", res.status);
+  } catch (err) {
+    preview.textContent = "送信失敗: " + err.message + "\n" + JSON.stringify(payload, null, 2);
+    console.error("[TPU-MINI] GAS send failed:", err);
+  }
+}
+
+function setConnected(connected) {
+  const statusEl = el("connStatus");
+  if (connected) {
+    statusEl.textContent = "接続中";
+    statusEl.className = "status connected";
+    el("connectBtn").textContent = "切断する";
+  } else {
+    statusEl.textContent = "未接続";
+    statusEl.className = "status disconnected";
+    el("connectBtn").textContent = "接続する";
+    el("liveValue").textContent = "--.-";
+    el("modeBadge").textContent = "MODE: -";
+  }
+}
+
+async function connect() {
+  if (!navigator.bluetooth) {
+    alert("このブラウザはWeb Bluetoothに対応していません(Android ChromeやPC版Chrome/Edgeでお試しください)。");
+    return;
+  }
+  try {
+    bleDevice = await navigator.bluetooth.requestDevice({
+      filters: [{ services: [SERVICE_UUID] }],
+    });
+    bleDevice.addEventListener("gattserverdisconnected", () => setConnected(false));
+
+    bleServer = await bleDevice.gatt.connect();
+    const service = await bleServer.getPrimaryService(SERVICE_UUID);
+
+    const liveChar = await service.getCharacteristic(LIVE_CHAR_UUID);
+    await liveChar.startNotifications();
+    liveChar.addEventListener("characteristicvaluechanged", (e) => {
+      const text = textDecoder.decode(e.target.value);
+      el("liveValue").textContent = text;
+    });
+
+    const confirmedChar = await service.getCharacteristic(CONFIRMED_CHAR_UUID);
+    await confirmedChar.startNotifications();
+    confirmedChar.addEventListener("characteristicvaluechanged", (e) => {
+      const text = textDecoder.decode(e.target.value);
+      const kpa = parseFloat(text);
+      if (!Number.isNaN(kpa)) onConfirmedValue(kpa);
+    });
+
+    const modeChar = await service.getCharacteristic(MODE_CHAR_UUID);
+    await modeChar.startNotifications();
+    modeChar.addEventListener("characteristicvaluechanged", (e) => {
+      const text = textDecoder.decode(e.target.value);
+      lastKnownModeChar = text; // ★GAS送信payloadのmode欄用に保持
+      el("modeBadge").textContent = "MODE: " + (text === "A" ? "AUTO" : "MANUAL");
+    });
+    // ★接続直後の初期値もReadで一度取得しておく
+    try {
+      const initialMode = await modeChar.readValue();
+      const text = textDecoder.decode(initialMode);
+      lastKnownModeChar = text;
+      el("modeBadge").textContent = "MODE: " + (text === "A" ? "AUTO" : "MANUAL");
+    } catch (_) { /* Readできなくても致命的ではないので無視 */ }
+
+    setConnected(true);
+  } catch (err) {
+    console.error(err);
+    if (err.name !== "NotFoundError") { // ユーザーがデバイス選択をキャンセルした場合は静かに戻す
+      alert("接続に失敗しました: " + err.message);
+    }
+  }
+}
+
+function disconnect() {
+  if (bleDevice && bleDevice.gatt.connected) {
+    bleDevice.gatt.disconnect();
+  }
+  setConnected(false);
+}
+
+el("connectBtn").addEventListener("click", () => {
+  if (bleDevice && bleDevice.gatt.connected) {
+    disconnect();
+  } else {
+    connect();
+  }
+});
+el("resetBtn").addEventListener("click", resetSession);
+el("sendBtn").addEventListener("click", sendToGas);
+el("wheelOrder").addEventListener("change", resetSession);
+
+resetSession();
+</script>
+
+</body>
+</html>
