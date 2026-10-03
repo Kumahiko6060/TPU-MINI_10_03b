@@ -252,10 +252,13 @@ function resetSession() {
   el("payloadPreview").style.display = "none";
 }
 
+// ★表示位置は測定順と無関係に固定(車を上から見て前側が上): 上段 FL | FR、下段 RL | RR
+const WHEEL_DISPLAY_LAYOUT = ["FL", "FR", "RL", "RR"];
+
 function renderWheels() {
   const order = currentWheelOrder();
   const nextWheel = order[currentOrderIdx] || null;
-  el("wheelGrid").innerHTML = order.map(w => {
+  el("wheelGrid").innerHTML = WHEEL_DISPLAY_LAYOUT.map(w => {
     const v = wheelValues[w];
     const isActive = (w === nextWheel);
     return `
