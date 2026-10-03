@@ -181,6 +181,48 @@
     display: none;
   }
 
+  /* --- 校正(第4版) --- */
+  details.cal {
+    margin-top: 24px;
+    background: #1a1c22;
+    border-radius: 12px;
+    padding: 12px 14px;
+  }
+  details.cal summary {
+    font-size: 15px;
+    color: #aaa;
+    cursor: pointer;
+  }
+  .cal-body { margin-top: 12px; }
+  .cal-current {
+    font-size: 13px;
+    color: #ccc;
+    margin-bottom: 8px;
+    font-variant-numeric: tabular-nums;
+  }
+  .cal-result {
+    font-size: 13px;
+    padding: 8px 10px;
+    border-radius: 8px;
+    background: #23262f;
+    color: #ccc;
+    margin-bottom: 12px;
+  }
+  .cal-result.ok   { background: #163d24; color: #4ade80; }
+  .cal-result.err  { background: #3d1a1a; color: #f87171; }
+  .cal-result.run  { background: #0e3a44; color: #22d3ee; }
+  .cal-step {
+    border-top: 1px solid #2a2d38;
+    padding-top: 10px;
+    margin-top: 10px;
+  }
+  .cal-hint {
+    font-size: 12px;
+    color: #888;
+    margin-bottom: 8px;
+    line-height: 1.5;
+  }
+
   pre#payloadPreview {
     background: #1a1c22;
     border-radius: 10px;
@@ -241,9 +283,41 @@
 
 <pre id="payloadPreview"></pre>
 
+<details class="cal" id="calPanel">
+  <summary>校正</summary>
+  <div class="cal-body">
+    <div class="cal-current" id="calCurrent">ゼロ点 -- kPa / 倍率 --</div>
+    <div class="cal-result" id="calResult">未接続</div>
+
+    <div class="cal-step">
+      <div class="cal-hint">1. ゼロ点: チャックを何にもつながず、大気に開放した状態で押してください。</div>
+      <button id="calZeroBtn" disabled>ゼロ点を取る</button>
+    </div>
+
+    <div class="cal-step">
+      <div class="cal-hint">2. 倍率: 本体をMANUALにしてからタイヤにつなぎ、同じタイヤを基準器(Core2版など)で測った値を入れて押してください。
+        終わったらチャックを外してください。</div>
+      <div class="row" style="margin-bottom:0;">
+        <input type="number" id="calMaster" placeholder="基準値" min="50" max="551" step="0.1" style="width:110px;">
+        <span style="font-size:13px;color:#aaa;">kPa</span>
+        <button id="calGainBtn" disabled>倍率を合わせる</button>
+      </div>
+    </div>
+
+    <div class="cal-step">
+      <div class="cal-hint">校正値を初期値(ゼロ点0・倍率1)に戻します。</div>
+      <button id="calResetBtn" disabled>初期値に戻す</button>
+    </div>
+  </div>
+</details>
+
 <script>
 // =================================================================
-// TPU-MINI スマホ側Webアプリ(第3版: 第2版 + 本体の電池残量表示と充電の催促)
+// TPU-MINI スマホ側Webアプリ(第4版: 第3版 + 校正画面)
+// ・第4版: 画面下の折りたたみ「校正」から、送信機へ ZERO / GAIN:<基準値> / RESET を送る。
+//   結果は送信機のCAL_STATUS("<結果>;Z=<ゼロ点>;G=<倍率>")を受けて日本語で表示する。
+//   倍率合わせはMANUALモードでのみ受け付ける(AUTOだとタイヤにつないだ瞬間に確定値が送られ、
+//   測定値として記録されてしまうため)。
 // ・第3版: 送信機の電池特性(BAT_CHAR、"<残量%>;<充電台0/1>")を受け取り、
 //   本体と同じ色分けのバー+数字を表示。20%未満で黄、10%未満で赤の帯を画面上部に出す
 //   (ずれ幅あり: 黄は25%以上、赤は15%以上に戻るまで消さない)。充電台に置いている間は帯を出さない。
@@ -277,6 +351,9 @@ const LIVE_CHAR_UUID      = "12345678-1234-5678-1234-56789abcdef1";
 const CONFIRMED_CHAR_UUID = "12345678-1234-5678-1234-56789abcdef2";
 const MODE_CHAR_UUID      = "12345678-1234-5678-1234-56789abcdef3";
 const BAT_CHAR_UUID       = "12345678-1234-5678-1234-56789abcdef6";
+const CAL_CMD_CHAR_UUID   = "12345678-1234-5678-1234-56789abcdef4";
+const CAL_STAT_CHAR_UUID  = "12345678-1234-5678-1234-56789abcdef5";
+const CAL_MASTER_MIN = 50, CAL_MASTER_MAX = 551.6;   // 送信機側の受付範囲と同じ
 
 const BAT_WARN_PCT = 20, BAT_WARN_CLEAR_PCT = 25;  // 黄色の帯
 const BAT_LOW_PCT  = 10, BAT_LOW_CLEAR_PCT  = 15;  // 赤い帯
@@ -459,6 +536,99 @@ function parseBattery(text) {
   return { pct: Number.isNaN(pct) ? null : pct, onCharger: b === "1" };
 }
 
+// ---- 校正 ----------------------------------------------------------
+let calCmdChar = null;
+let calRunning = false;
+
+const CAL_MESSAGES = {
+  "READY":       ["待機中", ""],
+  "RUN:ZERO":    ["ゼロ点を測定中…", "run"],
+  "RUN:GAIN":    ["倍率を測定中…", "run"],
+  "OK:ZERO":     ["ゼロ点を保存しました", "ok"],
+  "OK:GAIN":     ["倍率を保存しました。チャックを外してください", "ok"],
+  "OK:RESET":    ["初期値に戻しました", "ok"],
+  "BUSY":        ["測定中または校正中のため受け付けられませんでした。少し待ってからやり直してください", "err"],
+  "ERR:CMD":     ["送信機がコマンドを理解できませんでした", "err"],
+  "ERR:MASTER":  ["基準値が範囲外です(50〜551kPa)", "err"],
+  "ERR:TIMEOUT": ["測定値が十分に集まりませんでした。ADCの接続を確認してください", "err"],
+  "ERR:ZERO":    ["圧力がかかっています。チャックを外し、大気開放でやり直してください", "err"],
+  "ERR:DENOM":   ["圧力が低すぎます。タイヤにつないだ状態でやり直してください", "err"],
+  "ERR:GAIN":    ["補正量が大きすぎます(±20%超)。基準値とつなぎ方を確認してください", "err"],
+  "ERR:SAVE":    ["本体への保存に失敗しました", "err"],
+};
+
+function updateCalButtons() {
+  const ok = !!calCmdChar && bleDevice && bleDevice.gatt.connected && !calRunning;
+  el("calZeroBtn").disabled = !ok;
+  el("calGainBtn").disabled = !ok;
+  el("calResetBtn").disabled = !ok;
+}
+
+function showCalResult(text, cls) {
+  const r = el("calResult");
+  r.textContent = text;
+  r.className = "cal-result" + (cls ? " " + cls : "");
+}
+
+// "OK:ZERO;Z=0.12;G=1.0234" を表示に反映
+function onCalStatus(text) {
+  const parts = text.split(";");
+  const result = parts[0];
+  let z = null, g = null;
+  parts.slice(1).forEach(p => {
+    if (p.startsWith("Z=")) z = parseFloat(p.slice(2));
+    if (p.startsWith("G=")) g = parseFloat(p.slice(2));
+  });
+  if (z != null && g != null && !Number.isNaN(z) && !Number.isNaN(g)) {
+    el("calCurrent").textContent = `ゼロ点 ${z.toFixed(2)} kPa / 倍率 ${g.toFixed(4)}`;
+  }
+  const m = CAL_MESSAGES[result] || [result, ""];
+  showCalResult(m[0], m[1]);
+  calRunning = result.startsWith("RUN:");
+  updateCalButtons();
+}
+
+async function sendCalCommand(cmd) {
+  if (!calCmdChar) return;
+  try {
+    const data = new TextEncoder().encode(cmd);
+    if (calCmdChar.writeValueWithResponse) await calCmdChar.writeValueWithResponse(data);
+    else await calCmdChar.writeValue(data);
+  } catch (err) {
+    showCalResult("送信に失敗しました: " + err.message, "err");
+  }
+}
+
+function resetCalUi() {
+  calCmdChar = null;
+  calRunning = false;
+  el("calCurrent").textContent = "ゼロ点 -- kPa / 倍率 --";
+  showCalResult("未接続", "");
+  updateCalButtons();
+}
+
+el("calZeroBtn").addEventListener("click", () => {
+  if (!confirm("チャックを何にもつながず、大気開放の状態ですか？\nこの状態を0kPaとして保存します。")) return;
+  sendCalCommand("ZERO");
+});
+el("calGainBtn").addEventListener("click", () => {
+  if (lastKnownModeChar === "A") {
+    alert("本体がAUTOモードです。\nタイヤにつないだ瞬間に確定値が送られてしまうため、MANUALに切り替えてから行ってください。");
+    return;
+  }
+  const v = parseFloat(el("calMaster").value);
+  if (Number.isNaN(v) || v < CAL_MASTER_MIN || v > CAL_MASTER_MAX) {
+    alert("基準値を50〜551kPaの範囲で入力してください。");
+    return;
+  }
+  if (!confirm(`タイヤにつないだ状態ですか？\n本機の値が基準値 ${v.toFixed(1)} kPa に合うように倍率を保存します。`)) return;
+  sendCalCommand("GAIN:" + v.toFixed(1));
+});
+el("calResetBtn").addEventListener("click", () => {
+  if (!confirm("校正値を初期値(ゼロ点0・倍率1)に戻しますか？")) return;
+  sendCalCommand("RESET");
+});
+
 function setConnected(connected) {
   const statusEl = el("connStatus");
   if (connected) {
@@ -472,6 +642,7 @@ function setConnected(connected) {
     el("liveValue").textContent = "--.-";
     el("modeBadge").textContent = "MODE: -";
     renderBattery(null, false);   // 未接続の間は分からないので「--」に戻し、帯も消す
+    resetCalUi();
   }
 }
 
@@ -534,7 +705,24 @@ async function connect() {
       console.log("[TPU-MINI] battery characteristic not available:", err.message);
     }
 
+    // ★校正(送信機第4版以降)。取得できなければ校正欄は使えないまま、他は従来どおり
+    try {
+      const calStatChar = await service.getCharacteristic(CAL_STAT_CHAR_UUID);
+      await calStatChar.startNotifications();
+      calStatChar.addEventListener("characteristicvaluechanged", (e) => {
+        onCalStatus(textDecoder.decode(e.target.value));
+      });
+      calCmdChar = await service.getCharacteristic(CAL_CMD_CHAR_UUID);
+      const initialCal = await calStatChar.readValue();
+      onCalStatus(textDecoder.decode(initialCal));
+    } catch (err) {
+      calCmdChar = null;
+      showCalResult("この送信機は校正に対応していません", "err");
+      console.log("[TPU-MINI] calibration characteristics not available:", err.message);
+    }
+
     setConnected(true);
+    updateCalButtons();
   } catch (err) {
     console.error(err);
     if (err.name !== "NotFoundError") { // ユーザーがデバイス選択をキャンセルした場合は静かに戻す
