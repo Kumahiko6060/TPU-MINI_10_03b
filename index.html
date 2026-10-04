@@ -64,6 +64,7 @@
   }
   .status.connected { background: #163d24; color: #4ade80; }
   .status.disconnected { background: #3d1a1a; color: #f87171; }
+  .status.reconnecting { background: #4a3b0b; color: #facc15; }
 
   .live-card {
     background: #1a1c22;
@@ -314,7 +315,14 @@
 
 <script>
 // =================================================================
-// TPU-MINI スマホ側Webアプリ(第5版: 第4版 + 本体の電源OFFボタン)
+// TPU-MINI スマホ側Webアプリ(第6版: 第5版 + 自動再接続)
+// ・第6版: 本体側の事情(スリープ・電源OFF・圏外)で切れたら、ページを開いている間は3秒ごとに
+//   自動で再接続を試みる(回数無制限)。自分で「切断する」を押した時は試みない。
+//   画面ロックから戻った時もすぐに1回試みる。再接続中は状態欄が黄色「再接続中…」、
+//   接続ボタンは「再接続をやめる」。切れている間も4輪の測定値は残す。
+//   通知の受け取りは oncharacteristicvaluechanged への代入にしている(再接続のたびに
+//   addEventListenerすると同じ処理が重複登録され、確定値が二重に記録されるため)。
+//   ※ページを再読み込み/閉じた後は、Web Bluetoothの制限で「接続する」から選び直しが必要。
 // ・第5版: 接続ボタンの行に「本体の電源を切る」を追加。CAL_CMDへ "OFF" を送る(送信機第6.1版以降)。
 //   充電台に置いている間は送信機が ERR:CHARGER を返すので、その旨を知らせる。
 // ・第4版: 画面下の折りたたみ「校正」から、送信機へ ZERO / GAIN:<基準値> / RESET を送る。
@@ -642,6 +650,14 @@ el("calResetBtn").addEventListener("click", () => {
   sendCalCommand("RESET");
 });
 
+const RECONNECT_INTERVAL_MS = 3000;   // 自動再接続を試みる間隔
+const CONNECT_TIMEOUT_MS = 8000;      // 1回の接続の試みの上限(本体が見つからない時に待ち続けないように)
+
+let userDisconnect = false;   // 自分で「切断する」を押したか(押した時は自動再接続しない)
+let reconnecting = false;
+let reconnectTimer = null;
+let attemptInFlight = false;
+
 function setConnected(connected) {
   const statusEl = el("connStatus");
   if (connected) {
@@ -659,83 +675,139 @@ function setConnected(connected) {
   }
 }
 
+function showReconnecting() {
+  const statusEl = el("connStatus");
+  statusEl.textContent = "再接続中…";
+  statusEl.className = "status reconnecting";
+  el("connectBtn").textContent = "再接続をやめる";
+}
+
+function setModeBadge(text) {
+  lastKnownModeChar = text; // ★GAS送信payloadのmode欄用に保持
+  el("modeBadge").textContent = "MODE: " + (text === "A" ? "AUTO" : "MANUAL");
+}
+
+// GATTに接続して、全characteristicの通知を受け直す(初回接続・再接続で共通)
+async function connectGatt() {
+  bleServer = await bleDevice.gatt.connect();
+  const service = await bleServer.getPrimaryService(SERVICE_UUID);
+
+  const liveChar = await service.getCharacteristic(LIVE_CHAR_UUID);
+  liveChar.oncharacteristicvaluechanged = (e) => {
+    el("liveValue").textContent = textDecoder.decode(e.target.value);
+  };
+  await liveChar.startNotifications();
+
+  const confirmedChar = await service.getCharacteristic(CONFIRMED_CHAR_UUID);
+  confirmedChar.oncharacteristicvaluechanged = (e) => {
+    const kpa = parseFloat(textDecoder.decode(e.target.value));
+    if (!Number.isNaN(kpa)) onConfirmedValue(kpa);
+  };
+  await confirmedChar.startNotifications();
+
+  const modeChar = await service.getCharacteristic(MODE_CHAR_UUID);
+  modeChar.oncharacteristicvaluechanged = (e) => setModeBadge(textDecoder.decode(e.target.value));
+  await modeChar.startNotifications();
+  // ★接続直後の初期値もReadで一度取得しておく
+  try {
+    setModeBadge(textDecoder.decode(await modeChar.readValue()));
+  } catch (_) { /* Readできなくても致命的ではないので無視 */ }
+
+  // ★本体電池(第5.5版以降の送信機のみ)。無ければ電池欄は「--」のまま、他は従来どおり
+  try {
+    const batChar = await service.getCharacteristic(BAT_CHAR_UUID);
+    batChar.oncharacteristicvaluechanged = (e) => {
+      const b = parseBattery(textDecoder.decode(e.target.value));
+      renderBattery(b.pct, b.onCharger);
+    };
+    await batChar.startNotifications();
+    const b = parseBattery(textDecoder.decode(await batChar.readValue()));
+    renderBattery(b.pct, b.onCharger);
+  } catch (err) {
+    console.log("[TPU-MINI] battery characteristic not available:", err.message);
+  }
+
+  // ★校正・電源OFF(送信機第4版以降)。取得できなければ校正欄は使えないまま、他は従来どおり
+  try {
+    const calStatChar = await service.getCharacteristic(CAL_STAT_CHAR_UUID);
+    calStatChar.oncharacteristicvaluechanged = (e) => onCalStatus(textDecoder.decode(e.target.value));
+    await calStatChar.startNotifications();
+    calCmdChar = await service.getCharacteristic(CAL_CMD_CHAR_UUID);
+    onCalStatus(textDecoder.decode(await calStatChar.readValue()));
+  } catch (err) {
+    calCmdChar = null;
+    showCalResult("この送信機は校正に対応していません", "err");
+    console.log("[TPU-MINI] calibration characteristics not available:", err.message);
+  }
+
+  setConnected(true);
+  updateCalButtons();
+}
+
+// ---- 自動再接続 ----------------------------------------------------
+function onGattDisconnected() {
+  setConnected(false);
+  if (!userDisconnect && bleDevice) startReconnect();   // 本体側の事情で切れた時だけ
+}
+
+function startReconnect() {
+  if (reconnecting) return;
+  reconnecting = true;
+  showReconnecting();
+  console.log("[TPU-MINI] start auto reconnect");
+  reconnectTimer = setInterval(tryReconnect, RECONNECT_INTERVAL_MS);
+  tryReconnect();
+}
+
+function stopReconnect() {
+  reconnecting = false;
+  if (reconnectTimer) clearInterval(reconnectTimer);
+  reconnectTimer = null;
+}
+
+async function tryReconnect() {
+  if (!reconnecting || attemptInFlight || !bleDevice) return;
+  if (bleDevice.gatt.connected) { stopReconnect(); return; }
+  attemptInFlight = true;
+  try {
+    await Promise.race([
+      connectGatt(),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), CONNECT_TIMEOUT_MS)),
+    ]);
+    stopReconnect();
+    console.log("[TPU-MINI] reconnected");
+  } catch (err) {
+    // 見つからない・時間切れ → 次の周期でまた試す
+    if (bleDevice && bleDevice.gatt.connected === false) {
+      try { bleDevice.gatt.disconnect(); } catch (_) {}   // 待ち続けている接続を取り消す
+    }
+    if (reconnecting) showReconnecting();   // 途中で setConnected(false) に戻された表示を直す
+  } finally {
+    attemptInFlight = false;
+  }
+}
+
+// 画面ロックから戻った時は、すぐに1回試みる
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible" && reconnecting) tryReconnect();
+});
+
 async function connect() {
   if (!navigator.bluetooth) {
     alert("このブラウザはWeb Bluetoothに対応していません(Android ChromeやPC版Chrome/Edgeでお試しください)。");
     return;
   }
   try {
-    bleDevice = await navigator.bluetooth.requestDevice({
+    const device = await navigator.bluetooth.requestDevice({
       filters: [{ services: [SERVICE_UUID] }],
     });
-    bleDevice.addEventListener("gattserverdisconnected", () => setConnected(false));
-
-    bleServer = await bleDevice.gatt.connect();
-    const service = await bleServer.getPrimaryService(SERVICE_UUID);
-
-    const liveChar = await service.getCharacteristic(LIVE_CHAR_UUID);
-    await liveChar.startNotifications();
-    liveChar.addEventListener("characteristicvaluechanged", (e) => {
-      const text = textDecoder.decode(e.target.value);
-      el("liveValue").textContent = text;
-    });
-
-    const confirmedChar = await service.getCharacteristic(CONFIRMED_CHAR_UUID);
-    await confirmedChar.startNotifications();
-    confirmedChar.addEventListener("characteristicvaluechanged", (e) => {
-      const text = textDecoder.decode(e.target.value);
-      const kpa = parseFloat(text);
-      if (!Number.isNaN(kpa)) onConfirmedValue(kpa);
-    });
-
-    const modeChar = await service.getCharacteristic(MODE_CHAR_UUID);
-    await modeChar.startNotifications();
-    modeChar.addEventListener("characteristicvaluechanged", (e) => {
-      const text = textDecoder.decode(e.target.value);
-      lastKnownModeChar = text; // ★GAS送信payloadのmode欄用に保持
-      el("modeBadge").textContent = "MODE: " + (text === "A" ? "AUTO" : "MANUAL");
-    });
-    // ★接続直後の初期値もReadで一度取得しておく
-    try {
-      const initialMode = await modeChar.readValue();
-      const text = textDecoder.decode(initialMode);
-      lastKnownModeChar = text;
-      el("modeBadge").textContent = "MODE: " + (text === "A" ? "AUTO" : "MANUAL");
-    } catch (_) { /* Readできなくても致命的ではないので無視 */ }
-
-    // ★本体電池(第5.5版以降の送信機のみ)。無ければ電池欄は「--」のまま、他は従来どおり
-    try {
-      const batChar = await service.getCharacteristic(BAT_CHAR_UUID);
-      await batChar.startNotifications();
-      batChar.addEventListener("characteristicvaluechanged", (e) => {
-        const b = parseBattery(textDecoder.decode(e.target.value));
-        renderBattery(b.pct, b.onCharger);
-      });
-      const initialBat = await batChar.readValue();
-      const b = parseBattery(textDecoder.decode(initialBat));
-      renderBattery(b.pct, b.onCharger);
-    } catch (err) {
-      console.log("[TPU-MINI] battery characteristic not available:", err.message);
+    if (bleDevice !== device) {
+      if (bleDevice) bleDevice.removeEventListener("gattserverdisconnected", onGattDisconnected);
+      bleDevice = device;
+      bleDevice.addEventListener("gattserverdisconnected", onGattDisconnected);
     }
-
-    // ★校正(送信機第4版以降)。取得できなければ校正欄は使えないまま、他は従来どおり
-    try {
-      const calStatChar = await service.getCharacteristic(CAL_STAT_CHAR_UUID);
-      await calStatChar.startNotifications();
-      calStatChar.addEventListener("characteristicvaluechanged", (e) => {
-        onCalStatus(textDecoder.decode(e.target.value));
-      });
-      calCmdChar = await service.getCharacteristic(CAL_CMD_CHAR_UUID);
-      const initialCal = await calStatChar.readValue();
-      onCalStatus(textDecoder.decode(initialCal));
-    } catch (err) {
-      calCmdChar = null;
-      showCalResult("この送信機は校正に対応していません", "err");
-      console.log("[TPU-MINI] calibration characteristics not available:", err.message);
-    }
-
-    setConnected(true);
-    updateCalButtons();
+    userDisconnect = false;
+    await connectGatt();
   } catch (err) {
     console.error(err);
     if (err.name !== "NotFoundError") { // ユーザーがデバイス選択をキャンセルした場合は静かに戻す
@@ -745,6 +817,8 @@ async function connect() {
 }
 
 function disconnect() {
+  userDisconnect = true;
+  stopReconnect();
   if (bleDevice && bleDevice.gatt.connected) {
     bleDevice.gatt.disconnect();
   }
@@ -752,7 +826,13 @@ function disconnect() {
 }
 
 el("connectBtn").addEventListener("click", () => {
-  if (bleDevice && bleDevice.gatt.connected) {
+  if (reconnecting) {
+    // 再接続をやめる
+    userDisconnect = true;
+    stopReconnect();
+    try { if (bleDevice) bleDevice.gatt.disconnect(); } catch (_) {}
+    setConnected(false);
+  } else if (bleDevice && bleDevice.gatt.connected) {
     disconnect();
   } else {
     connect();
