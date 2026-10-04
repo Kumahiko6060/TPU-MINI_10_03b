@@ -246,6 +246,7 @@
 <div class="row">
   <button id="connectBtn" class="primary">接続する</button>
   <span id="connStatus" class="status disconnected">未接続</span>
+  <button id="powerOffBtn" disabled style="margin-left:auto;">本体の電源を切る</button>
 </div>
 
 <div class="bat-row">
@@ -313,7 +314,9 @@
 
 <script>
 // =================================================================
-// TPU-MINI スマホ側Webアプリ(第4版: 第3版 + 校正画面)
+// TPU-MINI スマホ側Webアプリ(第5版: 第4版 + 本体の電源OFFボタン)
+// ・第5版: 接続ボタンの行に「本体の電源を切る」を追加。CAL_CMDへ "OFF" を送る(送信機第6.1版以降)。
+//   充電台に置いている間は送信機が ERR:CHARGER を返すので、その旨を知らせる。
 // ・第4版: 画面下の折りたたみ「校正」から、送信機へ ZERO / GAIN:<基準値> / RESET を送る。
 //   結果は送信機のCAL_STATUS("<結果>;Z=<ゼロ点>;G=<倍率>")を受けて日本語で表示する。
 //   倍率合わせはMANUALモードでのみ受け付ける(AUTOだとタイヤにつないだ瞬間に確定値が送られ、
@@ -555,6 +558,8 @@ const CAL_MESSAGES = {
   "ERR:DENOM":   ["圧力が低すぎます。タイヤにつないだ状態でやり直してください", "err"],
   "ERR:GAIN":    ["補正量が大きすぎます(±20%超)。基準値とつなぎ方を確認してください", "err"],
   "ERR:SAVE":    ["本体への保存に失敗しました", "err"],
+  "OK:OFF":      ["本体の電源を切りました", "ok"],
+  "ERR:CHARGER": ["充電台に置いている間は電源を切れません", "err"],
 };
 
 function updateCalButtons() {
@@ -562,6 +567,7 @@ function updateCalButtons() {
   el("calZeroBtn").disabled = !ok;
   el("calGainBtn").disabled = !ok;
   el("calResetBtn").disabled = !ok;
+  el("powerOffBtn").disabled = !ok;
 }
 
 function showCalResult(text, cls) {
@@ -584,6 +590,9 @@ function onCalStatus(text) {
   }
   const m = CAL_MESSAGES[result] || [result, ""];
   showCalResult(m[0], m[1]);
+  if (result === "ERR:CHARGER") {
+    alert("充電台に置いている間は、本体の電源を切れません。\n充電台から外してからやり直してください。");
+  }
   calRunning = result.startsWith("RUN:");
   updateCalButtons();
 }
@@ -623,6 +632,10 @@ el("calGainBtn").addEventListener("click", () => {
   }
   if (!confirm(`タイヤにつないだ状態ですか？\n本機の値が基準値 ${v.toFixed(1)} kPa に合うように倍率を保存します。`)) return;
   sendCalCommand("GAIN:" + v.toFixed(1));
+});
+el("powerOffBtn").addEventListener("click", () => {
+  if (!confirm("本体の電源を切りますか？\n次に使う時は、USB-C(充電台)につなぐと起動します。")) return;
+  sendCalCommand("OFF");
 });
 el("calResetBtn").addEventListener("click", () => {
   if (!confirm("校正値を初期値(ゼロ点0・倍率1)に戻しますか？")) return;
