@@ -242,7 +242,7 @@
 <div class="bat-banner" id="batBanner"></div>
 
 <h1>TPU-MINI</h1>
-<div class="sub">送信機とBluetoothで接続し、確定値を4輪分まとめてGASへ送る想定のスマホアプリ(骨組み・初版)</div>
+<div class="sub">送信機とBluetoothで接続し、確定値を4輪分まとめてGASへ送るスマホアプリ(第7版: 送信機のG1長押しでも送信)</div>
 
 <div class="row">
   <button id="connectBtn" class="primary">接続する</button>
@@ -315,7 +315,12 @@
 
 <script>
 // =================================================================
-// TPU-MINI スマホ側Webアプリ(第6版: 第5版 + 自動再接続)
+// TPU-MINI スマホ側Webアプリ(第7版: 第6版 + 送信機のG1長押しでGASへ送信)
+// ・第7版: 送信機(第6.3版以降)のG1を2秒長押しすると、CAL_STATUSに "REQ:SEND;..." が届く。
+//   これを受けたら、そろっている輪の分だけGASへ送り(1輪も無ければ送らない)、結果を CAL_CMD に
+//   "SEND:OK" / "SEND:NG" で返す(送信機の画面にOK/NGが出る)。送信後も4輪の値は残す(従来どおり)。
+//   接続直後2秒間に届いた合図は無視する(iPadのBluefyが接続時に古い値を届けてくる対策。Androidでは無害)。
+//   画面の「GASへ送信」ボタンは従来どおり4輪そろった時だけ押せる。
 // ・第6版: 本体側の事情(スリープ・電源OFF・圏外)で切れたら、ページを開いている間は3秒ごとに
 //   自動で再接続を試みる(回数無制限)。自分で「切断する」を押した時は試みない。
 //   画面ロックから戻った時もすぐに1回試みる。再接続中は状態欄が黄色「再接続中…」、
@@ -451,16 +456,17 @@ function buildPayload() {
   const sessionId = "#" + carNoStr; // ★旧機のsetNumStr("#%03d")と同じ形式
   const order = currentWheelOrder();
 
-  // ★旧機は「1輪目確定」〜「4輪目確定」までの経過秒数。4輪目のタイムスタンプ - セッション開始時刻で算出
-  const lastWheel = order[order.length - 1];
-  const elapsedMs = (sessionStartMs != null && wheelTimestamps[lastWheel] != null)
-    ? (wheelTimestamps[lastWheel] - sessionStartMs) : 0;
+  // ★旧機は「1輪目確定」〜「4輪目確定」までの経過秒数。最後に確定した輪の時刻 - セッション開始時刻で算出
+  // (第7版: 送信機の長押しでは4輪そろっていなくても送るため、そろっている輪だけで計算する)
+  const filled = order.filter(w => wheelValues[w] != null);
+  const lastTs = filled.length ? Math.max(...filled.map(w => wheelTimestamps[w] || 0)) : 0;
+  const elapsedMs = (sessionStartMs != null && lastTs) ? (lastTs - sessionStartMs) : 0;
   const elapsedSec = Math.round(elapsedMs / 1000);
 
   // ★旧機のmode欄(NORMAL/SINGLE/TEST)とは概念が異なるため、送信機のAUTO/MANUALをそのまま流用する
   const modeStr = (lastKnownModeChar === "A") ? "AUTO" : "MANUAL";
 
-  return order.map(w => ({
+  return filled.map(w => ({
     tireIndex: WHEEL_INDEX[w],
     tire: w,
     pressure: wheelValues[w],
@@ -486,11 +492,40 @@ async function sendToGas() {
       headers: { "Content-Type": "text/plain;charset=utf-8" },
       body: JSON.stringify(payload),
     });
-    preview.textContent = `送信完了(HTTP ${res.status})\n` + JSON.stringify(payload, null, 2);
+    preview.textContent = `${res.ok ? "送信完了" : "送信失敗"}(HTTP ${res.status})\n` + JSON.stringify(payload, null, 2);
     console.log("[TPU-MINI] sent to GAS:", payload, "status:", res.status);
+    return res.ok;
   } catch (err) {
     preview.textContent = "送信失敗: " + err.message + "\n" + JSON.stringify(payload, null, 2);
     console.error("[TPU-MINI] GAS send failed:", err);
+    return false;
+  }
+}
+
+// ---- 第7版: 送信機のG1長押しからの送信 ----------------------------
+let deviceSendInFlight = false;
+let reqSendIgnoreUntil = 0;   // 接続直後はこの時刻まで合図を無視する
+
+async function onDeviceSendRequest() {
+  if (deviceSendInFlight) return;          // 送信中に重ねて来た合図は無視
+  if (performance.now() < reqSendIgnoreUntil) {
+    console.log("[TPU-MINI] REQ:SEND ignored (just connected)");
+    return;
+  }
+  deviceSendInFlight = true;
+  try {
+    const n = currentWheelOrder().filter(w => wheelValues[w] != null).length;
+    if (n === 0) {
+      const preview = el("payloadPreview");
+      preview.style.display = "block";
+      preview.textContent = "送信機から送信の指示がありましたが、測定値がまだ1輪もないため送りませんでした。";
+      await sendCalCommand("SEND:NG");
+      return;
+    }
+    const ok = await sendToGas();
+    await sendCalCommand(ok ? "SEND:OK" : "SEND:NG");
+  } finally {
+    deviceSendInFlight = false;
   }
 }
 
@@ -588,6 +623,7 @@ function showCalResult(text, cls) {
 function onCalStatus(text) {
   const parts = text.split(";");
   const result = parts[0];
+  if (result === "REQ:SEND") { onDeviceSendRequest(); return; }   // ★第7版: 校正の表示には出さない
   let z = null, g = null;
   parts.slice(1).forEach(p => {
     if (p.startsWith("Z=")) z = parseFloat(p.slice(2));
@@ -689,6 +725,7 @@ function setModeBadge(text) {
 
 // GATTに接続して、全characteristicの通知を受け直す(初回接続・再接続で共通)
 async function connectGatt() {
+  reqSendIgnoreUntil = Infinity;            // ★第7版: 接続の手続き中は送信の合図を無視
   bleServer = await bleDevice.gatt.connect();
   const service = await bleServer.getPrimaryService(SERVICE_UUID);
 
@@ -742,6 +779,7 @@ async function connectGatt() {
 
   setConnected(true);
   updateCalButtons();
+  reqSendIgnoreUntil = performance.now() + 2000;   // ★第7版: 接続直後2秒間も無視
 }
 
 // ---- 自動再接続 ----------------------------------------------------
