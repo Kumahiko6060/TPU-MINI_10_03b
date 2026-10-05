@@ -173,6 +173,7 @@
     color: #eee;
     font-variant-numeric: tabular-nums;
   }
+  .bat-chg.weak { background: #4a3b0b; color: #facc15; }   /* ★第7.2版: 弱い充電器 */
   .bat-chg {
     font-size: 12px;
     padding: 1px 8px;
@@ -242,7 +243,7 @@
 <div class="bat-banner" id="batBanner"></div>
 
 <h1>TPU-MINI</h1>
-<div class="sub">送信機とBluetoothで接続し、確定値を4輪分まとめてGASへ送るスマホアプリ(第7版: 送信機のG1長押しでも送信)</div>
+<div class="sub">送信機とBluetoothで接続し、確定値を4輪分まとめてGASへ送るスマホアプリ(第7.2版: 送信機のG1長押しでも送信 / iPhone・iPad(Bluefy)対応 / 弱い充電器の表示)</div>
 
 <div class="row">
   <button id="connectBtn" class="primary">接続する</button>
@@ -315,7 +316,16 @@
 
 <script>
 // =================================================================
-// TPU-MINI スマホ側Webアプリ(第7版: 第6版 + 送信機のG1長押しでGASへ送信)
+// TPU-MINI スマホ側Webアプリ(第7.2版: 第7.1版 + 弱い充電器の表示)
+// ・第7.2版: 送信機(第6.4版以降)の電池通知 "<残量%>;<充電台>;<弱い充電器>" の3つ目を読み、
+//   弱い充電器なら「充電中」を黄色の「充電器が弱い」にする。弱い充電器の間は充電されていないものとして、
+//   残量の催促帯も出す(充電台に置いていても)。3つ目が無い旧送信機では従来どおり。
+// ・第7.1版: 手書き用アプリ(v6.3.1/v6.4.1/v6.4.3)で実機確認したBluefy対策を入れた。Androidの動きは変わらない。
+//   (1) 通知は addEventListener で受ける(Bluefyは oncharacteristicvaluechanged への代入に対応していない)。
+//       再接続で同じ特性のオブジェクトが返っても二重登録しないよう、登録済みは onNotify() で読み飛ばす。
+//       届いた通知の e.target.uuid も確かめ、その特性自身の通知だけを処理する。
+//   (2) Bluefyは接続の手続き中(約3秒)、各特性が持っている値(確定値なら最後に確定した値)を何度も届けてくる。
+//       接続の手続き中と、終わってから1.5秒間に届いた確定値は捨てる(4輪の枠が勝手に埋まらないように)。
 // ・第7版: 送信機(第6.3版以降)のG1を2秒長押しすると、CAL_STATUSに "REQ:SEND;..." が届く。
 //   これを受けたら、そろっている輪の分だけGASへ送り(1輪も無ければ送らない)、結果を CAL_CMD に
 //   "SEND:OK" / "SEND:NG" で返す(送信機の画面にOK/NGが出る)。送信後も4輪の値は残す(従来どおり)。
@@ -532,7 +542,8 @@ async function onDeviceSendRequest() {
 // ---- 本体電池 ----------------------------------------------------
 let batBannerLevel = 0;  // 0=なし / 1=黄 / 2=赤(ずれ幅付きで切り替える)
 
-function renderBattery(pct, onCharger) {
+function renderBattery(pct, onCharger, weak) {
+  const charging = onCharger && !weak;   // ★第7.2版: 弱い充電器は「充電されていない」扱い
   const bar = el("batBar");
   if (pct == null || pct < 0) {
     bar.classList.add("unknown");
@@ -546,9 +557,11 @@ function renderBattery(pct, onCharger) {
     el("batEmpty").style.width = (100 - p) + "%";
     el("batPct").textContent = p + "%";
     el("batChg").style.display = onCharger ? "inline-block" : "none";
+    el("batChg").textContent = weak ? "充電器が弱い" : "充電中";   // ★第7.2版
+    el("batChg").classList.toggle("weak", !!weak);
 
-    if (onCharger) {
-      batBannerLevel = 0;                       // 充電台に置いたら催促しない
+    if (charging) {
+      batBannerLevel = 0;                       // 充電台に置いたら催促しない(弱い充電器は除く)
     } else if (p < BAT_LOW_PCT) {
       batBannerLevel = 2;
     } else if (batBannerLevel === 2 && p < BAT_LOW_CLEAR_PCT) {
@@ -575,11 +588,11 @@ function renderBattery(pct, onCharger) {
   }
 }
 
-// "42;0" → {pct:42, onCharger:false}
+// "42;0" → {pct:42, onCharger:false} / ★第7.2版: "42;1;1" → 3つ目=弱い充電器
 function parseBattery(text) {
-  const [a, b] = text.split(";");
+  const [a, b, w] = text.split(";");
   const pct = parseInt(a, 10);
-  return { pct: Number.isNaN(pct) ? null : pct, onCharger: b === "1" };
+  return { pct: Number.isNaN(pct) ? null : pct, onCharger: b === "1", weak: w === "1" };
 }
 
 // ---- 校正 ----------------------------------------------------------
@@ -706,7 +719,7 @@ function setConnected(connected) {
     el("connectBtn").textContent = "接続する";
     el("liveValue").textContent = "--.-";
     el("modeBadge").textContent = "MODE: -";
-    renderBattery(null, false);   // 未接続の間は分からないので「--」に戻し、帯も消す
+    renderBattery(null, false, false);   // 未接続の間は分からないので「--」に戻し、帯も消す
     resetCalUi();
   }
 }
@@ -724,26 +737,48 @@ function setModeBadge(text) {
 }
 
 // GATTに接続して、全characteristicの通知を受け直す(初回接続・再接続で共通)
+// ★第7.1版: 通知の受け取り(Bluefy対応。手書き用v6.4.1と同じ)
+const notifyRegistered = new WeakSet();
+function onNotify(ch, uuid, handler) {
+  if (notifyRegistered.has(ch)) return;   // 登録済み(再接続で同じオブジェクト)→何もしない
+  notifyRegistered.add(ch);
+  const want = uuid.toLowerCase();
+  ch.addEventListener("characteristicvaluechanged", (e) => {
+    const got = e && e.target && e.target.uuid;
+    if (got && String(got).toLowerCase() !== want) return;   // 別の特性の通知 → 無視
+    handler(e);
+  });
+}
+
+// ★第7.1版: 接続直後に届く古い確定値を捨てる(手書き用v6.4.3と同じ)
+const CONF_IGNORE_AFTER_CONNECT_MS = 1500;
+let confIgnoreUntil = 0;
+
 async function connectGatt() {
   reqSendIgnoreUntil = Infinity;            // ★第7版: 接続の手続き中は送信の合図を無視
+  confIgnoreUntil = Infinity;               // ★第7.1版: 接続の手続き中は確定値も捨てる
   bleServer = await bleDevice.gatt.connect();
   const service = await bleServer.getPrimaryService(SERVICE_UUID);
 
   const liveChar = await service.getCharacteristic(LIVE_CHAR_UUID);
-  liveChar.oncharacteristicvaluechanged = (e) => {
+  onNotify(liveChar, LIVE_CHAR_UUID, (e) => {
     el("liveValue").textContent = textDecoder.decode(e.target.value);
-  };
+  });
   await liveChar.startNotifications();
 
   const confirmedChar = await service.getCharacteristic(CONFIRMED_CHAR_UUID);
-  confirmedChar.oncharacteristicvaluechanged = (e) => {
+  onNotify(confirmedChar, CONFIRMED_CHAR_UUID, (e) => {
+    if (performance.now() < confIgnoreUntil) {   // ★第7.1版: 接続直後の古い値は捨てる
+      console.log("[TPU-MINI] confirmed value ignored (just connected):", textDecoder.decode(e.target.value));
+      return;
+    }
     const kpa = parseFloat(textDecoder.decode(e.target.value));
     if (!Number.isNaN(kpa)) onConfirmedValue(kpa);
-  };
+  });
   await confirmedChar.startNotifications();
 
   const modeChar = await service.getCharacteristic(MODE_CHAR_UUID);
-  modeChar.oncharacteristicvaluechanged = (e) => setModeBadge(textDecoder.decode(e.target.value));
+  onNotify(modeChar, MODE_CHAR_UUID, (e) => setModeBadge(textDecoder.decode(e.target.value)));
   await modeChar.startNotifications();
   // ★接続直後の初期値もReadで一度取得しておく
   try {
@@ -753,13 +788,13 @@ async function connectGatt() {
   // ★本体電池(第5.5版以降の送信機のみ)。無ければ電池欄は「--」のまま、他は従来どおり
   try {
     const batChar = await service.getCharacteristic(BAT_CHAR_UUID);
-    batChar.oncharacteristicvaluechanged = (e) => {
+    onNotify(batChar, BAT_CHAR_UUID, (e) => {
       const b = parseBattery(textDecoder.decode(e.target.value));
-      renderBattery(b.pct, b.onCharger);
-    };
+      renderBattery(b.pct, b.onCharger, b.weak);
+    });
     await batChar.startNotifications();
     const b = parseBattery(textDecoder.decode(await batChar.readValue()));
-    renderBattery(b.pct, b.onCharger);
+    renderBattery(b.pct, b.onCharger, b.weak);
   } catch (err) {
     console.log("[TPU-MINI] battery characteristic not available:", err.message);
   }
@@ -767,7 +802,7 @@ async function connectGatt() {
   // ★校正・電源OFF(送信機第4版以降)。取得できなければ校正欄は使えないまま、他は従来どおり
   try {
     const calStatChar = await service.getCharacteristic(CAL_STAT_CHAR_UUID);
-    calStatChar.oncharacteristicvaluechanged = (e) => onCalStatus(textDecoder.decode(e.target.value));
+    onNotify(calStatChar, CAL_STAT_CHAR_UUID, (e) => onCalStatus(textDecoder.decode(e.target.value)));
     await calStatChar.startNotifications();
     calCmdChar = await service.getCharacteristic(CAL_CMD_CHAR_UUID);
     onCalStatus(textDecoder.decode(await calStatChar.readValue()));
@@ -780,6 +815,7 @@ async function connectGatt() {
   setConnected(true);
   updateCalButtons();
   reqSendIgnoreUntil = performance.now() + 2000;   // ★第7版: 接続直後2秒間も無視
+  confIgnoreUntil = performance.now() + CONF_IGNORE_AFTER_CONNECT_MS;   // ★第7.1版
 }
 
 // ---- 自動再接続 ----------------------------------------------------
