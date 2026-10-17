@@ -246,7 +246,7 @@
 <div class="bat-banner" id="batBanner"></div>
 
 <h1>TPU-MINI</h1>
-<div class="sub">送信機とBluetoothで接続し、確定値を4輪分まとめてGASへ送るスマホアプリ(第7.4版: 送信機のG1長押しでも送信 / iPhone・iPad(Bluefy)対応 / 弱い充電器の表示 / 送信機との紐付け / 表示単位kPa・bar・psi / 車番を覚える)</div>
+<div class="sub">送信機とBluetoothで接続し、確定値を4輪分まとめてGASへ送るスマホアプリ(第7.4.1版: 送信機のG1長押しでも送信 / iPhone・iPad(Bluefy)対応 / 弱い充電器の表示 / 送信機との紐付け / 表示単位kPa・bar・psi / 車番を覚える)</div>
 
 <div class="row">
   <button id="connectBtn" class="primary">接続する</button>
@@ -328,7 +328,12 @@
 
 <script>
 // =================================================================
-// TPU-MINI スマホ側Webアプリ(第7.4版: 第7.3版 + 表示単位の切り替え + 車番などを覚える)
+// TPU-MINI スマホ側Webアプリ(第7.4.1版: 第7.4版 + 紐付け中に接続画面が空になる不具合の修正)
+// ・第7.4.1版: 紐付け中は名前の完全一致("TPU-MINI-XXXX")で探していたが、スマホを閉じた後などに
+//   接続画面の一覧が空のままになることがあった(スマホが覚えている本体の名前が、今の名前と食い違う時に起きると考えている)。
+//   紐付け中も「TPU-MINI で始まる名前」で探し、選んだ後にIDを確かめる方式に変えた。
+//   ・IDが紐付け中と違う → つながずに知らせる(別の本体を使う時は「紐付けを解除」してから)
+//   ・名前にIDが無い(スマホが古い名前を覚えている) → 確かめられないので、そのままつなぐ
 // ・第7.4版: ライブ値の下のボタンで表示単位を kPa / bar / psi から選べる(表示だけ。送信機とのやり取りと
 //   GASへ送る値はこれまでどおり kPa のまま)。校正の基準値も選んだ単位で入れ、kPaに直して送信機へ送る。
 //   車番・測定順・表示単位は端末に覚え、ページを開き直しても(Bluetoothが切れて読み込み直しになっても)元に戻る。
@@ -888,7 +893,7 @@ async function connectGatt() {
 
 
 // ★紐付け(送信機ID): 送信機(第6.5版以降)の名前 "TPU-MINI-XXXX" の XXXX を端末に覚え、
-//   次からはその1台だけを接続画面に出す。リンクに ?id=XXXX を付けて開くと、その送信機に紐付ける。
+//   接続画面には TPU-MINI を全部出し、選んだ後に紐付け中のIDか確かめる(第7.4.1版)。リンクに ?id=XXXX を付けて開くと、その送信機に紐付ける。
 const PAIR_KEY = "tpuMiniPairedId";
 function getPairedId() {
   try { return localStorage.getItem(PAIR_KEY) || ""; } catch (_) { return ""; }
@@ -976,13 +981,21 @@ async function connect() {
     return;
   }
   try {
-    // ★紐付け済みなら、その送信機だけを出す。未紐付けなら名前が TPU-MINI で始まるものを全部出す
+    // ★第7.4.1版: 紐付け中も名前が TPU-MINI で始まるものを出し、選んだ後にIDを確かめる
+    //   (名前の完全一致で探すと、スマホが覚えている名前とずれた時に一覧が空になるため)
     const pairedId = getPairedId();
     const device = await navigator.bluetooth.requestDevice({
-      filters: pairedId
-        ? [{ name: "TPU-MINI-" + pairedId, services: [SERVICE_UUID] }]
-        : [{ namePrefix: "TPU-MINI", services: [SERVICE_UUID] }],
+      filters: [{ namePrefix: "TPU-MINI", services: [SERVICE_UUID] }],
     });
+    if (pairedId) {
+      const gotId = idFromDeviceName(device.name);
+      if (gotId && gotId !== pairedId) {
+        alert(`選んだ本体(${gotId})は、紐付け中の本体(${pairedId})ではありません。\n` +
+              `別の本体を使う時は、先に「紐付けを解除」を押してください。`);
+        return;
+      }
+      if (!gotId) console.log("[TPU-MINI] device name has no ID, cannot verify:", device.name);
+    }
     // ★初めての接続: 名前からIDを読み取って覚える(IDの無い古い送信機は覚えない)
     if (!pairedId) {
       const newId = idFromDeviceName(device.name);
