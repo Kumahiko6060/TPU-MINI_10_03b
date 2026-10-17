@@ -78,6 +78,9 @@
     font-weight: 600;
     line-height: 1;
   }
+  .unit-sel { display:flex; justify-content:center; gap:6px; margin:6px 0 2px; }
+  .unit-sel button { min-width:64px; padding:6px 10px; font-size:14px; background:#2a2a2a; color:#ccc; border:1px solid #444; border-radius:6px; }
+  .unit-sel button.on { background:#2563eb; color:#fff; border-color:#2563eb; font-weight:bold; }
   .live-unit {
     font-size: 14px;
     color: #888;
@@ -243,12 +246,16 @@
 <div class="bat-banner" id="batBanner"></div>
 
 <h1>TPU-MINI</h1>
-<div class="sub">送信機とBluetoothで接続し、確定値を4輪分まとめてGASへ送るスマホアプリ(第7.2版: 送信機のG1長押しでも送信 / iPhone・iPad(Bluefy)対応 / 弱い充電器の表示)</div>
+<div class="sub">送信機とBluetoothで接続し、確定値を4輪分まとめてGASへ送るスマホアプリ(第7.4版: 送信機のG1長押しでも送信 / iPhone・iPad(Bluefy)対応 / 弱い充電器の表示 / 送信機との紐付け / 表示単位kPa・bar・psi / 車番を覚える)</div>
 
 <div class="row">
   <button id="connectBtn" class="primary">接続する</button>
   <span id="connStatus" class="status disconnected">未接続</span>
   <button id="powerOffBtn" disabled style="margin-left:auto;">本体の電源を切る</button>
+</div>
+<div class="row" style="margin-top:-4px;">
+  <span id="pairInfo" style="font-size:13px;color:#aaa;">紐付けなし</span>
+  <button id="unpairBtn" disabled style="font-size:13px;padding:6px 10px;">紐付けを解除</button>
 </div>
 
 <div class="bat-row">
@@ -260,7 +267,12 @@
 
 <div class="live-card">
   <div class="live-value" id="liveValue">--.-</div>
-  <div class="live-unit">kPa (ライブ値)</div>
+  <div class="live-unit"><span id="liveUnit">kPa</span> (ライブ値)</div>
+  <div class="unit-sel" id="unitSel">
+    <button data-unit="kPa">kPa</button>
+    <button data-unit="bar">bar</button>
+    <button data-unit="psi">psi</button>
+  </div>
   <div class="mode-badge" id="modeBadge">MODE: -</div>
 </div>
 
@@ -302,7 +314,7 @@
         終わったらチャックを外してください。</div>
       <div class="row" style="margin-bottom:0;">
         <input type="number" id="calMaster" placeholder="基準値" min="50" max="551" step="0.1" style="width:110px;">
-        <span style="font-size:13px;color:#aaa;">kPa</span>
+        <span style="font-size:13px;color:#aaa;" id="calMasterUnit">kPa</span>
         <button id="calGainBtn" disabled>倍率を合わせる</button>
       </div>
     </div>
@@ -316,7 +328,12 @@
 
 <script>
 // =================================================================
-// TPU-MINI スマホ側Webアプリ(第7.2版: 第7.1版 + 弱い充電器の表示)
+// TPU-MINI スマホ側Webアプリ(第7.4版: 第7.3版 + 表示単位の切り替え + 車番などを覚える)
+// ・第7.4版: ライブ値の下のボタンで表示単位を kPa / bar / psi から選べる(表示だけ。送信機とのやり取りと
+//   GASへ送る値はこれまでどおり kPa のまま)。校正の基準値も選んだ単位で入れ、kPaに直して送信機へ送る。
+//   車番・測定順・表示単位は端末に覚え、ページを開き直しても(Bluetoothが切れて読み込み直しになっても)元に戻る。
+// ・第7.3版: 送信機(第6.5版以降)の名前 "TPU-MINI-XXXX" のIDを端末に覚え、次からはその1台だけ接続画面に出す。
+//   接続ボタンの下の行に「紐付け中: XXXX」と「紐付けを解除」。リンクに ?id=XXXX を付けると、その送信機に紐付けて開く。
 // ・第7.2版: 送信機(第6.4版以降)の電池通知 "<残量%>;<充電台>;<弱い充電器>" の3つ目を読み、
 //   弱い充電器なら「充電中」を黄色の「充電器が弱い」にする。弱い充電器の間は充電されていないものとして、
 //   残量の催促帯も出す(充電台に置いていても)。3つ目が無い旧送信機では従来どおり。
@@ -363,7 +380,7 @@
 // ・GAS Web AppはブラウザのfetchだとCORSプリフライトで詰まりやすいため、
 //   Content-Type: text/plain で送るワークアラウンドを使っている(GAS側のdoPost()が
 //   e.postData.contentsを文字列としてJSON.parse()する前提。既存のdoPost()実装を要確認)。
-// ・ブラウザのlocalStorage等は意図的に使っていない(車番・測定順は毎回リセット)。
+// ・端末に覚えるもの(localStorage): 紐付けID(第7.3版)、車番・測定順・表示単位(第7.4版)。測定値そのものは覚えない。
 //
 // ★重要: Web Bluetoothは「secureコンテキスト」でしか動かない(https、または
 //   localhostのみ)。このファイルをそのままfile://で開くと繋がらない場合がある。
@@ -379,7 +396,35 @@ const MODE_CHAR_UUID      = "12345678-1234-5678-1234-56789abcdef3";
 const BAT_CHAR_UUID       = "12345678-1234-5678-1234-56789abcdef6";
 const CAL_CMD_CHAR_UUID   = "12345678-1234-5678-1234-56789abcdef4";
 const CAL_STAT_CHAR_UUID  = "12345678-1234-5678-1234-56789abcdef5";
-const CAL_MASTER_MIN = 50, CAL_MASTER_MAX = 551.6;   // 送信機側の受付範囲と同じ
+const CAL_MASTER_MIN = 50, CAL_MASTER_MAX = 551.6;   // 送信機側の受付範囲と同じ(kPa)
+
+// ★第7.4版: 表示単位。内部の値・送信機とのやり取り・GASへの送信はすべて kPa のまま
+const KPA_PER_PSI = 6.894757;
+const UNITS = {
+  kPa: { label: "kPa", from: v => v,               to: v => v,               digits: 1, step: "0.1"  },
+  bar: { label: "bar", from: v => v / 100,         to: v => v * 100,         digits: 2, step: "0.01" },
+  psi: { label: "psi", from: v => v / KPA_PER_PSI, to: v => v * KPA_PER_PSI, digits: 1, step: "0.1"  },
+};
+const SETTINGS_KEY = "tpuMiniAppSettings";   // {unit, carNo, wheelOrder}
+let displayUnit = "kPa";
+let lastLiveKpa = null;   // 単位を切り替えた時にすぐ描き直すため
+
+function fmtP(kpa, unit = displayUnit) {
+  const u = UNITS[unit];
+  return u.from(kpa).toFixed(u.digits);
+}
+function loadSettings() {
+  try { return JSON.parse(localStorage.getItem(SETTINGS_KEY) || "{}") || {}; } catch (_) { return {}; }
+}
+function saveSettings() {
+  try {
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify({
+      unit: displayUnit,
+      carNo: el("carNo").value,
+      wheelOrder: el("wheelOrder").value,
+    }));
+  } catch (_) {}
+}
 
 const BAT_WARN_PCT = 20, BAT_WARN_CLEAR_PCT = 25;  // 黄色の帯
 const BAT_LOW_PCT  = 10, BAT_LOW_CLEAR_PCT  = 15;  // 赤い帯
@@ -437,7 +482,7 @@ function renderWheels() {
     return `
       <div class="wheel-box ${isActive ? "active" : ""}">
         <div class="wheel-name">${w}</div>
-        <div class="wheel-value ${v == null ? "empty" : ""}">${v == null ? "---" : v.toFixed(1)}</div>
+        <div class="wheel-value ${v == null ? "empty" : ""}">${v == null ? "---" : fmtP(v)}</div>
       </div>`;
   }).join("");
 }
@@ -608,7 +653,7 @@ const CAL_MESSAGES = {
   "OK:RESET":    ["初期値に戻しました", "ok"],
   "BUSY":        ["測定中または校正中のため受け付けられませんでした。少し待ってからやり直してください", "err"],
   "ERR:CMD":     ["送信機がコマンドを理解できませんでした", "err"],
-  "ERR:MASTER":  ["基準値が範囲外です(50〜551kPa)", "err"],
+  "ERR:MASTER":  ["基準値が範囲外です(50〜551kPa / 0.50〜5.51bar / 7.3〜80.0psi)", "err"],
   "ERR:TIMEOUT": ["測定値が十分に集まりませんでした。ADCの接続を確認してください", "err"],
   "ERR:ZERO":    ["圧力がかかっています。チャックを外し、大気開放でやり直してください", "err"],
   "ERR:DENOM":   ["圧力が低すぎます。タイヤにつないだ状態でやり直してください", "err"],
@@ -632,6 +677,18 @@ function showCalResult(text, cls) {
   r.className = "cal-result" + (cls ? " " + cls : "");
 }
 
+let lastCalZ = null, lastCalG = null;   // ★第7.4版: 単位切り替えで描き直すため
+function renderCalCurrent() {
+  const unit = UNITS[displayUnit].label;
+  el("calCurrent").textContent = (lastCalZ == null)
+    ? `ゼロ点 -- ${unit} / 倍率 --`
+    : `ゼロ点 ${UNITS[displayUnit].from(lastCalZ).toFixed(UNITS[displayUnit].digits + 1)} ${unit} / 倍率 ${lastCalG.toFixed(4)}`;
+}
+function calRangeText() {
+  const u = UNITS[displayUnit];
+  return `${u.from(CAL_MASTER_MIN).toFixed(u.digits)}〜${u.from(CAL_MASTER_MAX).toFixed(u.digits)}${u.label}`;
+}
+
 // "OK:ZERO;Z=0.12;G=1.0234" を表示に反映
 function onCalStatus(text) {
   const parts = text.split(";");
@@ -643,7 +700,8 @@ function onCalStatus(text) {
     if (p.startsWith("G=")) g = parseFloat(p.slice(2));
   });
   if (z != null && g != null && !Number.isNaN(z) && !Number.isNaN(g)) {
-    el("calCurrent").textContent = `ゼロ点 ${z.toFixed(2)} kPa / 倍率 ${g.toFixed(4)}`;
+    lastCalZ = z; lastCalG = g;
+    renderCalCurrent();
   }
   const m = CAL_MESSAGES[result] || [result, ""];
   showCalResult(m[0], m[1]);
@@ -668,7 +726,8 @@ async function sendCalCommand(cmd) {
 function resetCalUi() {
   calCmdChar = null;
   calRunning = false;
-  el("calCurrent").textContent = "ゼロ点 -- kPa / 倍率 --";
+  lastCalZ = null; lastCalG = null;
+  renderCalCurrent();
   showCalResult("未接続", "");
   updateCalButtons();
 }
@@ -682,13 +741,18 @@ el("calGainBtn").addEventListener("click", () => {
     alert("本体がAUTOモードです。\nタイヤにつないだ瞬間に確定値が送られてしまうため、MANUALに切り替えてから行ってください。");
     return;
   }
-  const v = parseFloat(el("calMaster").value);
-  if (Number.isNaN(v) || v < CAL_MASTER_MIN || v > CAL_MASTER_MAX) {
-    alert("基準値を50〜551kPaの範囲で入力してください。");
+  // ★第7.4版: 選んでいる単位で入れてもらい、kPaに直して送る
+  const u = UNITS[displayUnit];
+  const vIn = parseFloat(el("calMaster").value);
+  const kpa = Number.isNaN(vIn) ? NaN : Math.round(u.to(vIn) * 10) / 10;
+  if (Number.isNaN(kpa) || kpa < CAL_MASTER_MIN - 0.05 || kpa > CAL_MASTER_MAX + 0.05) {
+    alert(`基準値を${calRangeText()}の範囲で入力してください。`);
     return;
   }
-  if (!confirm(`タイヤにつないだ状態ですか？\n本機の値が基準値 ${v.toFixed(1)} kPa に合うように倍率を保存します。`)) return;
-  sendCalCommand("GAIN:" + v.toFixed(1));
+  const kpaClamped = Math.min(Math.max(kpa, CAL_MASTER_MIN), CAL_MASTER_MAX);
+  const shown = (displayUnit === "kPa") ? `${kpaClamped.toFixed(1)} kPa` : `${vIn} ${u.label}(= ${kpaClamped.toFixed(1)} kPa)`;
+  if (!confirm(`タイヤにつないだ状態ですか？\n本機の値が基準値 ${shown} に合うように倍率を保存します。`)) return;
+  sendCalCommand("GAIN:" + kpaClamped.toFixed(1));
 });
 el("powerOffBtn").addEventListener("click", () => {
   if (!confirm("本体の電源を切りますか？\n次に使う時は、USB-C(充電台)につなぐと起動します。")) return;
@@ -718,6 +782,7 @@ function setConnected(connected) {
     statusEl.className = "status disconnected";
     el("connectBtn").textContent = "接続する";
     el("liveValue").textContent = "--.-";
+    lastLiveKpa = null;
     el("modeBadge").textContent = "MODE: -";
     renderBattery(null, false, false);   // 未接続の間は分からないので「--」に戻し、帯も消す
     resetCalUi();
@@ -762,7 +827,10 @@ async function connectGatt() {
 
   const liveChar = await service.getCharacteristic(LIVE_CHAR_UUID);
   onNotify(liveChar, LIVE_CHAR_UUID, (e) => {
-    el("liveValue").textContent = textDecoder.decode(e.target.value);
+    const raw = textDecoder.decode(e.target.value);
+    const kpa = parseFloat(raw);
+    lastLiveKpa = Number.isNaN(kpa) ? null : kpa;
+    el("liveValue").textContent = (lastLiveKpa == null) ? raw : fmtP(lastLiveKpa);   // ★第7.4版
   });
   await liveChar.startNotifications();
 
@@ -818,6 +886,42 @@ async function connectGatt() {
   confIgnoreUntil = performance.now() + CONF_IGNORE_AFTER_CONNECT_MS;   // ★第7.1版
 }
 
+
+// ★紐付け(送信機ID): 送信機(第6.5版以降)の名前 "TPU-MINI-XXXX" の XXXX を端末に覚え、
+//   次からはその1台だけを接続画面に出す。リンクに ?id=XXXX を付けて開くと、その送信機に紐付ける。
+const PAIR_KEY = "tpuMiniPairedId";
+function getPairedId() {
+  try { return localStorage.getItem(PAIR_KEY) || ""; } catch (_) { return ""; }
+}
+function setPairedId(id) {
+  try { if (id) localStorage.setItem(PAIR_KEY, id); else localStorage.removeItem(PAIR_KEY); } catch (_) {}
+  renderPairInfo();
+}
+function idFromDeviceName(name) {
+  const m = /^TPU-MINI-([0-9A-F]{4})$/i.exec(name || "");
+  return m ? m[1].toUpperCase() : "";
+}
+function renderPairInfo() {
+  const id = getPairedId();
+  const info = document.getElementById("pairInfo");
+  const btn = document.getElementById("unpairBtn");
+  if (info) info.textContent = id ? `紐付け中: ${id}` : "紐付けなし";
+  if (btn) btn.disabled = !id;
+}
+function onUnpairClick() {
+  const id = getPairedId();
+  if (!id) return;
+  if (!confirm(`送信機 ${id} との紐付けを解除しますか？\n次に「接続」を押すと、近くのTPU-MINIが全部表示されます。`)) return;
+  setPairedId("");
+}
+// リンクの ?id=XXXX で紐付ける(配布用のQRコード向け)
+(function applyPairFromUrl() {
+  try {
+    const q = new URLSearchParams(location.search).get("id");
+    if (q && /^[0-9A-F]{4}$/i.test(q)) setPairedId(q.toUpperCase());
+  } catch (_) {}
+})();
+
 // ---- 自動再接続 ----------------------------------------------------
 function onGattDisconnected() {
   setConnected(false);
@@ -872,9 +976,18 @@ async function connect() {
     return;
   }
   try {
+    // ★紐付け済みなら、その送信機だけを出す。未紐付けなら名前が TPU-MINI で始まるものを全部出す
+    const pairedId = getPairedId();
     const device = await navigator.bluetooth.requestDevice({
-      filters: [{ services: [SERVICE_UUID] }],
+      filters: pairedId
+        ? [{ name: "TPU-MINI-" + pairedId, services: [SERVICE_UUID] }]
+        : [{ namePrefix: "TPU-MINI", services: [SERVICE_UUID] }],
     });
+    // ★初めての接続: 名前からIDを読み取って覚える(IDの無い古い送信機は覚えない)
+    if (!pairedId) {
+      const newId = idFromDeviceName(device.name);
+      if (newId) setPairedId(newId);
+    }
     if (bleDevice !== device) {
       if (bleDevice) bleDevice.removeEventListener("gattserverdisconnected", onGattDisconnected);
       bleDevice = device;
@@ -913,10 +1026,43 @@ el("connectBtn").addEventListener("click", () => {
   }
 });
 el("resetBtn").addEventListener("click", resetSession);
+el("unpairBtn").addEventListener("click", onUnpairClick);   // ★第7.3版
+renderPairInfo();
 el("sendBtn").addEventListener("click", sendToGas);
-el("wheelOrder").addEventListener("change", resetSession);
+el("wheelOrder").addEventListener("change", () => { saveSettings(); resetSession(); });
+
+// ★第7.4版: 表示単位と、覚えている車番・測定順
+function setUnit(unit) {
+  if (!UNITS[unit]) unit = "kPa";
+  displayUnit = unit;
+  const u = UNITS[unit];
+  document.querySelectorAll("#unitSel button").forEach(b => b.classList.toggle("on", b.dataset.unit === unit));
+  el("liveUnit").textContent = u.label;
+  el("calMasterUnit").textContent = u.label;
+  el("calMaster").step = u.step;
+  el("calMaster").min = u.from(CAL_MASTER_MIN).toFixed(u.digits);
+  el("calMaster").max = u.from(CAL_MASTER_MAX).toFixed(u.digits);
+  el("calMaster").value = "";   // 単位が変わると数字の意味が変わるので、入れかけの基準値は消す
+  if (lastLiveKpa != null) el("liveValue").textContent = fmtP(lastLiveKpa);
+  renderWheels();
+  renderCalCurrent();
+}
+document.querySelectorAll("#unitSel button").forEach(b => b.addEventListener("click", () => {
+  setUnit(b.dataset.unit);
+  saveSettings();
+}));
+el("carNo").addEventListener("input", saveSettings);
+el("carNo").addEventListener("change", saveSettings);
+
+(function restoreSettings() {
+  const st = loadSettings();
+  if (st.carNo != null && st.carNo !== "") el("carNo").value = st.carNo;
+  if (st.wheelOrder != null && WHEEL_ORDER_TABLE[parseInt(st.wheelOrder, 10)]) el("wheelOrder").value = String(st.wheelOrder);
+  displayUnit = UNITS[st.unit] ? st.unit : "kPa";
+})();
 
 resetSession();
+setUnit(displayUnit);
 </script>
 
 </body>
