@@ -48,7 +48,7 @@
   button:disabled {
     opacity: 0.4;
   }
-  select, input[type="number"] {
+  select, input[type="number"], input[type="text"] {
     font-size: 15px;
     padding: 8px 10px;
     border-radius: 8px;
@@ -246,7 +246,7 @@
 <div class="bat-banner" id="batBanner"></div>
 
 <h1>TPU-MINI</h1>
-<div class="sub">送信機とBluetoothで接続し、確定値を4輪分まとめてGASへ送るスマホアプリ(第7.4.1版: 送信機のG1長押しでも送信 / iPhone・iPad(Bluefy)対応 / 弱い充電器の表示 / 送信機との紐付け / 表示単位kPa・bar・psi / 車番を覚える)</div>
+<div class="sub">送信機とBluetoothで接続し、確定値を4輪分まとめてGASへ送るスマホアプリ(第7.5版: タイヤのセット番号 / 送信機のG1長押しでも送信 / iPhone・iPad(Bluefy)対応 / 弱い充電器の表示 / 送信機との紐付け / 表示単位kPa・bar・psi / 車番を覚える)</div>
 
 <div class="row">
   <button id="connectBtn" class="primary">接続する</button>
@@ -279,6 +279,8 @@
 <div class="row">
   <label style="font-size:13px;color:#aaa;">車番</label>
   <input type="number" id="carNo" value="1" min="1" max="999" style="width:80px;">
+  <label style="font-size:13px;color:#aaa;">セット</label>
+  <input type="text" id="tireSet" maxlength="20" placeholder="例: A3" autocomplete="off" style="width:90px;">
   <label style="font-size:13px;color:#aaa;">測定順</label>
   <select id="wheelOrder">
     <option value="0">FL始点 (FL-RL-RR-FR)</option>
@@ -328,7 +330,10 @@
 
 <script>
 // =================================================================
-// TPU-MINI スマホ側Webアプリ(第7.4.1版: 第7.4版 + 紐付け中に接続画面が空になる不具合の修正)
+// TPU-MINI スマホ側Webアプリ(第7.5版: タイヤのセット番号)
+// ・第7.5版: 車番の右に「セット」欄(自由な文字、20文字まで)を追加。車番・測定順・表示単位と一緒に端末に覚え、
+//   リセットでは消さない。GASへ送るJSONの各輪に tireSet を追加(空欄なら "")。
+//   GAS側(doPost)は sessionId の後ろに " / <セット>" を付けて、ブロック1行目のメモ列に書く(空欄・旧Core2版は従来どおり)。
 // ・第7.4.1版: 紐付け中は名前の完全一致("TPU-MINI-XXXX")で探していたが、スマホを閉じた後などに
 //   接続画面の一覧が空のままになることがあった(スマホが覚えている本体の名前が、今の名前と食い違う時に起きると考えている)。
 //   紐付け中も「TPU-MINI で始まる名前」で探し、選んだ後にIDを確かめる方式に変えた。
@@ -385,7 +390,7 @@
 // ・GAS Web AppはブラウザのfetchだとCORSプリフライトで詰まりやすいため、
 //   Content-Type: text/plain で送るワークアラウンドを使っている(GAS側のdoPost()が
 //   e.postData.contentsを文字列としてJSON.parse()する前提。既存のdoPost()実装を要確認)。
-// ・端末に覚えるもの(localStorage): 紐付けID(第7.3版)、車番・測定順・表示単位(第7.4版)。測定値そのものは覚えない。
+// ・端末に覚えるもの(localStorage): 紐付けID(第7.3版)、車番・測定順・表示単位(第7.4版)、セット番号(第7.5版)。測定値そのものは覚えない。
 //
 // ★重要: Web Bluetoothは「secureコンテキスト」でしか動かない(https、または
 //   localhostのみ)。このファイルをそのままfile://で開くと繋がらない場合がある。
@@ -410,7 +415,7 @@ const UNITS = {
   bar: { label: "bar", from: v => v / 100,         to: v => v * 100,         digits: 2, step: "0.01" },
   psi: { label: "psi", from: v => v / KPA_PER_PSI, to: v => v * KPA_PER_PSI, digits: 1, step: "0.1"  },
 };
-const SETTINGS_KEY = "tpuMiniAppSettings";   // {unit, carNo, wheelOrder}
+const SETTINGS_KEY = "tpuMiniAppSettings";   // {unit, carNo, wheelOrder, tireSet}
 let displayUnit = "kPa";
 let lastLiveKpa = null;   // 単位を切り替えた時にすぐ描き直すため
 
@@ -427,6 +432,7 @@ function saveSettings() {
       unit: displayUnit,
       carNo: el("carNo").value,
       wheelOrder: el("wheelOrder").value,
+      tireSet: el("tireSet").value,   // ★第7.5版
     }));
   } catch (_) {}
 }
@@ -525,6 +531,7 @@ function buildPayload() {
 
   // ★旧機のmode欄(NORMAL/SINGLE/TEST)とは概念が異なるため、送信機のAUTO/MANUALをそのまま流用する
   const modeStr = (lastKnownModeChar === "A") ? "AUTO" : "MANUAL";
+  const tireSet = el("tireSet").value.trim();   // ★第7.5版: 空欄なら ""
 
   return filled.map(w => ({
     tireIndex: WHEEL_INDEX[w],
@@ -534,6 +541,7 @@ function buildPayload() {
     carNo: carNoStr,
     sessionId: sessionId,
     elapsedSec: elapsedSec,
+    tireSet: tireSet,
   }));
 }
 
@@ -1066,10 +1074,13 @@ document.querySelectorAll("#unitSel button").forEach(b => b.addEventListener("cl
 }));
 el("carNo").addEventListener("input", saveSettings);
 el("carNo").addEventListener("change", saveSettings);
+el("tireSet").addEventListener("input", saveSettings);    // ★第7.5版
+el("tireSet").addEventListener("change", saveSettings);
 
 (function restoreSettings() {
   const st = loadSettings();
   if (st.carNo != null && st.carNo !== "") el("carNo").value = st.carNo;
+  if (typeof st.tireSet === "string") el("tireSet").value = st.tireSet;   // ★第7.5版
   if (st.wheelOrder != null && WHEEL_ORDER_TABLE[parseInt(st.wheelOrder, 10)]) el("wheelOrder").value = String(st.wheelOrder);
   displayUnit = UNITS[st.unit] ? st.unit : "kPa";
 })();
