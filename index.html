@@ -270,7 +270,7 @@
 <div class="bat-banner" id="batBanner"></div>
 
 <h1>TPU-MINI</h1>
-<div class="sub">送信機とBluetoothで接続し、確定値を4輪分まとめてGASへ送るスマホアプリ(第7.7.1版: 確認用の受信表示 / 第7.7版: 校正を2点方式に / 測定順の追加と自分の順番 / AUTOの低い値をはじく・外した時の最大値で上書き / 表示単位のままGASへ送信 / タイヤのセット番号 / 送信機のG1長押しでも送信 / iPhone・iPad(Bluefy)対応 / 弱い充電器の表示 / 送信機との紐付け / 表示単位kPa・bar・psi / 車番を覚える)</div>
+<div class="sub">送信機とBluetoothで接続し、確定値を4輪分まとめてGASへ送るスマホアプリ(第7.7版: 校正を2点方式に / 測定順の追加と自分の順番 / AUTOの低い値をはじく・外した時の最大値で上書き / 表示単位のままGASへ送信 / タイヤのセット番号 / 送信機のG1長押しでも送信 / iPhone・iPad(Bluefy)対応 / 弱い充電器の表示 / 送信機との紐付け / 表示単位kPa・bar・psi / 車番を覚える)</div>
 
 <div class="row">
   <button id="connectBtn" class="primary">接続する</button>
@@ -298,7 +298,6 @@
     <button data-unit="psi">psi</button>
   </div>
   <div class="mode-badge" id="modeBadge">MODE: -</div>
-  <div id="rxDebug" style="font-size:11px;color:#888;margin-top:6px;word-break:break-all;">受信: まだありません</div>
 </div>
 
 <div class="row">
@@ -387,9 +386,7 @@
 
 <script>
 // =================================================================
-// TPU-MINI スマホ側Webアプリ(第7.7.1版: 2点校正 / 測定順 / MAXホールドの上書き)
-// ・第7.7.1版(確認用・一時的): MANUALの0が枠に入らない件を調べるため、ライブ値の下に
-//   「最後に受け取った確定値の生の文字・その時のMODE・記録したか/捨てた理由」を1行出す。原因が分かったら消す。
+// TPU-MINI スマホ側Webアプリ(第7.7版: 2点校正 / 測定順 / MAXホールドの上書き)
 // ・第7.7版: (1) AUTOの時、20kPa以下の確定値は受け付けない(MANUALは0でも受け付ける=テスト送信)。
 //   (2) 送信機(第6.6版以降)が、チャックを外した時に "U:<値>" を送ってきたら、直前に確定した輪の値を上書きする。
 //       (AUTOのMAXホールド。確定値より1kPa以上高い値が出ていた時だけ送信機が送ってくる)
@@ -517,7 +514,7 @@ const BAT_WARN_PCT = 20, BAT_WARN_CLEAR_PCT = 25;  // 黄色の帯
 const BAT_LOW_PCT  = 10, BAT_LOW_CLEAR_PCT  = 15;  // 赤い帯
 
 // ★旧TPU(Core2版)と同じGAS Web App/スプレッドシートをそのまま使う方針のため、URLもそのまま流用。
-const GAS_URL = "https://script.google.com/a/macros/s/AKfycbyyTJfgQQLF3RMjczFfXXI1nyEWJOB6Xs_hVwLyN14s7YXo1tl0LLrWJpD8yYr6fxXVtQ/exec";
+const GAS_URL = "https://script.google.com/macros/s/AKfycbyyTJfgQQLF3RMjczFfXXI1nyEWJOB6Xs_hVwLyN14s7YXo1tl0LLrWJpD8yYr6fxXVtQ/exec";
 
 const WHEEL_NAMES = ["FL", "RL", "RR", "FR"];
 // ★旧スケッチのenum WheelIndex{FL=0,RL=1,RR=2,FR=3}と同じ固定インデックス(測定順とは無関係)
@@ -585,42 +582,33 @@ function renderWheels() {
 // ★第7.7版: AUTOの時は閾値(20kPa)以下の確定値を受け付けない(MANUALは0でも受け付ける=テスト送信)
 const AUTO_MIN_CONFIRMED_KPA = 20;
 
-// ★第7.7.1版(確認用): 最後に受け取った確定値と、どう扱ったかを1行出す
-function showRxDebug(raw, result) {
-  const d = new Date();
-  const hms = [d.getHours(), d.getMinutes(), d.getSeconds()].map(n => String(n).padStart(2, "0")).join(":");
-  el("rxDebug").textContent = `受信 ${hms} 文字=${JSON.stringify(raw)} MODE=${JSON.stringify(lastKnownModeChar)} → ${result}`;
-}
-
 function onConfirmedText(text) {
   const t = String(text || "").trim();
   const isUpdate = t.startsWith("U:");
   const kpa = parseFloat(isUpdate ? t.slice(2) : t);
-  if (Number.isNaN(kpa)) { showRxDebug(text, "捨てた(数字でない)"); return; }   // 空(送信機第6.6版の初期値)など
+  if (Number.isNaN(kpa)) return;   // 空(送信機第6.6版の初期値)など
   if (lastKnownModeChar === "A" && kpa <= AUTO_MIN_CONFIRMED_KPA) {
     console.log("[TPU-MINI] low value ignored in AUTO:", t);
-    showRxDebug(text, "捨てた(AUTOで20kPa以下)");
     return;
   }
-  if (isUpdate) showRxDebug(text, onUpdatedValue(kpa));
-  else showRxDebug(text, onConfirmedValue(kpa));
+  if (isUpdate) onUpdatedValue(kpa);
+  else onConfirmedValue(kpa);
 }
 
 // ★第7.7版: 外した時の最大値で、直前に確定した輪を上書きする(時刻は確定した時のまま)
 function onUpdatedValue(kpa) {
   const order = currentWheelOrder();
-  if (currentOrderIdx <= 0) return "捨てた(上書きする輪が無い)";   // まだ1輪も確定していない(リセット直後など)
+  if (currentOrderIdx <= 0) return;           // まだ1輪も確定していない(リセット直後など)→無視
   const wheel = order[currentOrderIdx - 1];
-  if (wheelValues[wheel] == null) return "捨てた(上書きする輪が無い)";
+  if (wheelValues[wheel] == null) return;
   console.log(`[TPU-MINI] ${wheel} updated ${wheelValues[wheel]} -> ${kpa}`);
   wheelValues[wheel] = kpa;
   renderWheels();
-  return `${wheel}を上書き`;
 }
 
 function onConfirmedValue(kpa) {
   const order = currentWheelOrder();
-  if (currentOrderIdx >= order.length) return "捨てた(4輪うまっている)"; // 手動リセット待ち
+  if (currentOrderIdx >= order.length) return; // 4輪分埋まっていれば無視(手動リセット待ち)
   const wheel = order[currentOrderIdx];
   const now = Date.now();
   if (sessionStartMs == null) sessionStartMs = now; // ★旧機と同じく「1輪目確定」でセッション計測開始
@@ -631,7 +619,6 @@ function onConfirmedValue(kpa) {
   if (currentOrderIdx >= order.length) {
     el("sendBtn").disabled = false;
   }
-  return `${wheel}に記録`;
 }
 
 // ★旧TPU(Core2版)のsendDirectToGas()と同じJSON形式(配列、各要素にtireIndex/tire/pressure/
@@ -1006,7 +993,6 @@ async function connectGatt() {
   onNotify(confirmedChar, CONFIRMED_CHAR_UUID, (e) => {
     if (performance.now() < confIgnoreUntil) {   // ★第7.1版: 接続直後の古い値は捨てる
       console.log("[TPU-MINI] confirmed value ignored (just connected):", textDecoder.decode(e.target.value));
-      showRxDebug(textDecoder.decode(e.target.value), "捨てた(接続直後)");
       return;
     }
     onConfirmedText(textDecoder.decode(e.target.value));   // ★第7.7版: "U:" の上書きと、AUTOの低い値の除外
